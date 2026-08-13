@@ -35,20 +35,38 @@ func main() {
 		colly.MaxDepth(3),
 		colly.AllowedDomains("en.wikipedia.org"),
 		colly.Async(true),
-
-		// Disallow standard Wikipedia utility namespaces, query parameters, and non-article paths
-		colly.DisallowURLFilters(
-			regexp.MustCompile(`(?i)/w/index\.php`),
-			regexp.MustCompile(`(?i)/wiki/(Special|Talk|User|Wikipedia|File|MediaWiki|Template|Template_talk|Help|Portal|Category):`),
-			regexp.MustCompile(`(?i)\?(action|printable|useskin)=`),
-		),
 	)
 
-	// Rate limiting & politeness
+	// ⚡️ SPEED UP 1: Bump parallelism & drop artificial delay
 	c.Limit(&colly.LimitRule{
 		DomainGlob:  "*",
-		Parallelism: 2,
-		Delay:       500 * time.Millisecond,
+		Parallelism: 5,                      // Increased concurrency
+		Delay:       100 * time.Millisecond, // Reduced wait time between hits
+	})
+
+	disallowed := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)/w/index\.php`),
+		regexp.MustCompile(`(?i)/wiki/(Special|Talk|User|Wikipedia|File|MediaWiki|Template|Template_talk|Help|Portal|Category):`),
+		regexp.MustCompile(`(?i)\?(action|printable|useskin)=`),
+	}
+
+	c.OnRequest(func(r *colly.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		// Stop immediately once we have enough pages
+		if visitedCount >= maxPages {
+			r.Abort()
+			return
+		}
+
+		urlStr := r.URL.String()
+		for _, re := range disallowed {
+			if re.MatchString(urlStr) {
+				r.Abort()
+				return
+			}
+		}
 	})
 
 	c.OnHTML("html", func(e *colly.HTMLElement) {
@@ -59,16 +77,13 @@ func main() {
 		}
 		visitedCount++
 		currentCount := visitedCount
-		mu.Unlock()
 
 		pageURL := e.Request.URL.String()
 		title := strings.TrimSpace(e.ChildText("title"))
 
-		// Basic text extraction (removing redundant whitespace)
 		rawText := e.ChildText("p")
 		content := strings.Join(strings.Fields(rawText), " ")
 
-		// Collect outward links
 		var links []string
 		e.ForEach("a[href]", func(_ int, el *colly.HTMLElement) {
 			link := el.Request.AbsoluteURL(el.Attr("href"))
@@ -85,23 +100,19 @@ func main() {
 			Links:   links,
 		}
 
-		mu.Lock()
 		docs = append(docs, doc)
 		fmt.Printf("[%d/%d] Scraped: %s\n", currentCount, maxPages, pageURL)
+
+		// ⚡️ SPEED UP 2: Save immediately and exit the process on exact hit
+		if visitedCount == maxPages {
+			mu.Unlock()
+			saveJSON("documents.json", docs)
+			os.Exit(0) // Instantly hands control back to your terminal
+		}
 		mu.Unlock()
 
-		if currentCount < maxPages {
-			for _, l := range links {
-				e.Request.Visit(l)
-			}
-		}
-	})
-
-	c.OnRequest(func(r *colly.Request) {
-		mu.Lock()
-		defer mu.Unlock()
-		if visitedCount >= maxPages {
-			r.Abort()
+		for _, l := range links {
+			e.Request.Visit(l)
 		}
 	})
 
