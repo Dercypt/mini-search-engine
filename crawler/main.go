@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -24,24 +25,28 @@ type Document struct {
 }
 
 func main() {
-	maxPages := 30
+	maxPages := 1000
 	seedURL := "https://en.wikipedia.org/wiki/Search_engine"
 
 	var docs []Document
 	var mu sync.Mutex
 	visitedCount := 0
 
+	// Track enqueued/visited URLs across threads
+	visitedURLs := make(map[string]bool)
+
 	c := colly.NewCollector(
-		colly.MaxDepth(3),
+		colly.MaxDepth(4),
 		colly.AllowedDomains("en.wikipedia.org"),
 		colly.Async(true),
+		colly.UserAgent("MiniSearchEngineBot/1.0 (+https://github.com/yourusername/mini-search-engine)"),
 	)
+	c.IgnoreRobotsTxt = false
 
-	// ⚡️ SPEED UP 1: Bump parallelism & drop artificial delay
 	c.Limit(&colly.LimitRule{
 		DomainGlob:  "*",
-		Parallelism: 5,                      // Increased concurrency
-		Delay:       100 * time.Millisecond, // Reduced wait time between hits
+		Parallelism: 5,
+		Delay:       100 * time.Millisecond,
 	})
 
 	disallowed := []*regexp.Regexp{
@@ -50,22 +55,16 @@ func main() {
 		regexp.MustCompile(`(?i)\?(action|printable|useskin)=`),
 	}
 
+	// Mark seed URL as visited
+	visitedURLs[seedURL] = true
+
 	c.OnRequest(func(r *colly.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 
-		// Stop immediately once we have enough pages
+		// Abort request if target count reached
 		if visitedCount >= maxPages {
 			r.Abort()
-			return
-		}
-
-		urlStr := r.URL.String()
-		for _, re := range disallowed {
-			if re.MatchString(urlStr) {
-				r.Abort()
-				return
-			}
 		}
 	})
 
@@ -75,21 +74,51 @@ func main() {
 			mu.Unlock()
 			return
 		}
+
 		visitedCount++
 		currentCount := visitedCount
+		mu.Unlock()
 
-		pageURL := e.Request.URL.String()
+		pageURL := normalizeURL(e.Request.URL.String())
 		title := strings.TrimSpace(e.ChildText("title"))
 
-		rawText := e.ChildText("p")
-		content := strings.Join(strings.Fields(rawText), " ")
+		// Extract article body paragraphs and section headers
+		var textPieces []string
+		e.ForEach("div.mw-parser-output > p, div.mw-parser-output h2, div.mw-parser-output h3", func(_ int, el *colly.HTMLElement) {
+			txt := strings.TrimSpace(el.Text)
+			if txt != "" {
+				textPieces = append(textPieces, txt)
+			}
+		})
+		content := strings.Join(textPieces, " ")
 
 		var links []string
+		var linksToVisit []string
+
 		e.ForEach("a[href]", func(_ int, el *colly.HTMLElement) {
-			link := el.Request.AbsoluteURL(el.Attr("href"))
-			if link != "" {
-				links = append(links, link)
+			rawLink := el.Request.AbsoluteURL(el.Attr("href"))
+			if rawLink == "" {
+				return
 			}
+
+			cleanLink := normalizeURL(rawLink)
+
+			// Fast regex check against noise paths
+			for _, re := range disallowed {
+				if re.MatchString(cleanLink) {
+					return
+				}
+			}
+
+			links = append(links, cleanLink)
+
+			// Thread-safe deduplication before queueing
+			mu.Lock()
+			if !visitedURLs[cleanLink] && visitedCount < maxPages {
+				visitedURLs[cleanLink] = true
+				linksToVisit = append(linksToVisit, cleanLink)
+			}
+			mu.Unlock()
 		})
 
 		doc := Document{
@@ -100,19 +129,21 @@ func main() {
 			Links:   links,
 		}
 
+		mu.Lock()
 		docs = append(docs, doc)
 		fmt.Printf("[%d/%d] Scraped: %s\n", currentCount, maxPages, pageURL)
 
-		// ⚡️ SPEED UP 2: Save immediately and exit the process on exact hit
-		if visitedCount == maxPages {
-			mu.Unlock()
+		// Instant termination when target is hit
+		if currentCount == maxPages {
 			saveJSON("documents.json", docs)
-			os.Exit(0) // Instantly hands control back to your terminal
+			mu.Unlock()
+			os.Exit(0)
 		}
 		mu.Unlock()
 
-		for _, l := range links {
-			e.Request.Visit(l)
+		// Enqueue filtered, unvisited links
+		for _, link := range linksToVisit {
+			e.Request.Visit(link)
 		}
 	})
 
@@ -120,11 +151,20 @@ func main() {
 		log.Printf("Error requesting %s: %v", r.Request.URL, err)
 	})
 
-	fmt.Printf("Starting filtered crawl at: %s\n", seedURL)
+	fmt.Printf("Starting optimized crawl at: %s\n", seedURL)
 	c.Visit(seedURL)
 	c.Wait()
 
 	saveJSON("documents.json", docs)
+}
+
+func normalizeURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	u.Fragment = ""
+	return u.String()
 }
 
 func hashURL(url string) string {
@@ -138,11 +178,9 @@ func saveJSON(filename string, docs []Document) {
 	if err != nil {
 		log.Fatalf("Failed to serialize JSON: %v", err)
 	}
-
 	err = os.WriteFile(filename, file, 0644)
 	if err != nil {
 		log.Fatalf("Failed to write to file: %v", err)
 	}
-
 	fmt.Printf("\nDone! Saved %d clean documents to %s\n", len(docs), filename)
 }
