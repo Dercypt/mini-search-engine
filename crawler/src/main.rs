@@ -41,11 +41,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Work frontier channel
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
-    // Bloom filter built via builder pattern for ~10,000 expected URLs
+    // Bloom filter sized for ~10,000 expected URLs
     let bloom_filter = Arc::new(Mutex::new(
-        BloomFilter::builder(10_000)
-            .false_positive_rate(0.001)
-            .build_bloom(),
+        BloomFilter::with_false_pos(0.001).expected_items(10_000),
     ));
     let saved_docs = Arc::new(Mutex::new(Vec::<Document>::new()));
 
