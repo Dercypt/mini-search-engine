@@ -4,3 +4,10 @@ crawler/documents.json
 EOT
 *.json
 *.jsonl
+target/
+**/target/
+documents.json
+**/documents.json
+
+index.json
+**/index.json
