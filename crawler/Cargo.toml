@@ -1,0 +1,16 @@
+[package]
+name = "crawler"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.38", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "gzip", "brotli"] }
+scraper = "0.19"
+url = "2.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+hex = "0.4"
+regex = "1.10"
+fastbloom = "0.8"
