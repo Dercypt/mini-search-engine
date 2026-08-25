@@ -1,13 +1,11 @@
+# OS Artifacts
 .DS_Store
-**/.DS_Store
-crawler/documents.json
-EOT
+Thumbs.db
+
+# Rust Build Artifacts
+target/
+
+# Scraped Data & Inverted Indices
 *.json
 *.jsonl
-target/
-**/target/
-documents.json
-**/documents.json
-
-index.json
-**/index.json
+*.csv
