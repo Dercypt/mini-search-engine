@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -27,12 +28,20 @@ type Document struct {
 func main() {
 	maxPages := 1000
 	seedURL := "https://en.wikipedia.org/wiki/Search_engine"
+	outputFile := "documents.jsonl"
 
-	var docs []Document
+	// Create/truncate file on start
+	file, err := os.OpenFile(outputFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		log.Fatalf("Failed to open output file: %v", err)
+	}
+	defer file.Close()
+
+	writer := bufio.NewWriter(file)
+	defer writer.Flush()
+
 	var mu sync.Mutex
 	visitedCount := 0
-
-	// Track enqueued/visited URLs across threads
 	visitedURLs := make(map[string]bool)
 
 	c := colly.NewCollector(
@@ -55,14 +64,11 @@ func main() {
 		regexp.MustCompile(`(?i)\?(action|printable|useskin)=`),
 	}
 
-	// Mark seed URL as visited
 	visitedURLs[seedURL] = true
 
 	c.OnRequest(func(r *colly.Request) {
 		mu.Lock()
 		defer mu.Unlock()
-
-		// Abort request if target count reached
 		if visitedCount >= maxPages {
 			r.Abort()
 		}
@@ -82,7 +88,6 @@ func main() {
 		pageURL := normalizeURL(e.Request.URL.String())
 		title := strings.TrimSpace(e.ChildText("title"))
 
-		// Extract article body paragraphs and section headers
 		var textPieces []string
 		e.ForEach("div.mw-parser-output > p, div.mw-parser-output h2, div.mw-parser-output h3", func(_ int, el *colly.HTMLElement) {
 			txt := strings.TrimSpace(el.Text)
@@ -103,7 +108,6 @@ func main() {
 
 			cleanLink := normalizeURL(rawLink)
 
-			// Fast regex check against noise paths
 			for _, re := range disallowed {
 				if re.MatchString(cleanLink) {
 					return
@@ -112,7 +116,6 @@ func main() {
 
 			links = append(links, cleanLink)
 
-			// Thread-safe deduplication before queueing
 			mu.Lock()
 			if !visitedURLs[cleanLink] && visitedCount < maxPages {
 				visitedURLs[cleanLink] = true
@@ -129,19 +132,21 @@ func main() {
 			Links:   links,
 		}
 
+		// Stream document directly to disk
 		mu.Lock()
-		docs = append(docs, doc)
+		line, _ := json.Marshal(doc)
+		writer.Write(line)
+		writer.WriteString("\n")
+		writer.Flush()
 		fmt.Printf("[%d/%d] Scraped: %s\n", currentCount, maxPages, pageURL)
 
-		// Instant termination when target is hit
 		if currentCount == maxPages {
-			saveJSON("documents.json", docs)
 			mu.Unlock()
+			fmt.Printf("\nDone! Saved %d documents to %s\n", currentCount, outputFile)
 			os.Exit(0)
 		}
 		mu.Unlock()
 
-		// Enqueue filtered, unvisited links
 		for _, link := range linksToVisit {
 			e.Request.Visit(link)
 		}
@@ -154,8 +159,6 @@ func main() {
 	fmt.Printf("Starting optimized crawl at: %s\n", seedURL)
 	c.Visit(seedURL)
 	c.Wait()
-
-	saveJSON("documents.json", docs)
 }
 
 func normalizeURL(rawURL string) string {
@@ -171,16 +174,4 @@ func hashURL(url string) string {
 	h := sha256.New()
 	h.Write([]byte(url))
 	return hex.EncodeToString(h.Sum(nil))[:12]
-}
-
-func saveJSON(filename string, docs []Document) {
-	file, err := json.MarshalIndent(docs, "", "  ")
-	if err != nil {
-		log.Fatalf("Failed to serialize JSON: %v", err)
-	}
-	err = os.WriteFile(filename, file, 0644)
-	if err != nil {
-		log.Fatalf("Failed to write to file: %v", err)
-	}
-	fmt.Printf("\nDone! Saved %d clean documents to %s\n", len(docs), filename)
 }

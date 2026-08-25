@@ -2,3 +2,5 @@
 **/.DS_Store
 crawler/documents.json
 EOT
+*.json
+*.jsonl
