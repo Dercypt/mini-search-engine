@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Work frontier channel
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
-    // Bloom filter sized for ~10,000 URLs with low false-positive rate
+    // Bloom filter built via builder pattern for ~10,000 expected URLs
     let bloom_filter = Arc::new(Mutex::new(
         BloomFilter::builder(10_000)
             .false_positive_rate(0.001)
@@ -116,7 +116,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let document = Html::parse_document(&html_text);
 
-            // Selectors
             let title_selector = Selector::parse("title").unwrap();
             let body_selector = Selector::parse(
                 "div.mw-parser-output > p, div.mw-parser-output h2, div.mw-parser-output h3",
