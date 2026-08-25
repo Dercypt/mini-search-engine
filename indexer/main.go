@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"regexp"
@@ -41,41 +42,47 @@ func main() {
 	inputPath := "../crawler/documents.jsonl"
 	file, err := os.Open(inputPath)
 	if err != nil {
-		log.Fatalf("Couldn't find documents.jsonl. Run the crawler first: %v", err)
+		log.Fatalf("Couldn't find documents.jsonl: %v", err)
 	}
 	defer file.Close()
 
+	reader := bufio.NewReader(file)
 	index := make(map[string][]Posting)
 	docLengths := make(map[string]int)
 	docCount := 0
 	totalLength := 0
 
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		var doc Document
-		if err := json.Unmarshal(scanner.Bytes(), &doc); err != nil {
-			continue
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			var doc Document
+			if err := json.Unmarshal(line, &doc); err == nil {
+				docCount++
+				tokens := tokenize(doc.Title + " " + doc.Content)
+				docLen := len(tokens)
+				docLengths[doc.ID] = docLen
+				totalLength += docLen
+
+				termFreqs := make(map[string]int)
+				for _, token := range tokens {
+					termFreqs[token]++
+				}
+
+				for term, freq := range termFreqs {
+					index[term] = append(index[term], Posting{
+						DocID:     doc.ID,
+						Frequency: freq,
+					})
+				}
+			}
 		}
 
-		docCount++
-		// Combine title and content for indexing
-		tokens := tokenize(doc.Title + " " + doc.Content)
-		docLen := len(tokens)
-		docLengths[doc.ID] = docLen
-		totalLength += docLen
-
-		// Count term frequencies per document
-		termFreqs := make(map[string]int)
-		for _, token := range tokens {
-			termFreqs[token]++
-		}
-
-		// Build postings list
-		for term, freq := range termFreqs {
-			index[term] = append(index[term], Posting{
-				DocID:     doc.ID,
-				Frequency: freq,
-			})
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			log.Printf("Error reading stream: %v", err)
+			break
 		}
 	}
 
@@ -102,7 +109,7 @@ func main() {
 		log.Fatalf("Failed to write index file: %v", err)
 	}
 
-	fmt.Printf("Successfully indexed %d documents. Output saved to %s/%s\n", docCount, "indexer", outputPath)
+	fmt.Printf("Successfully indexed %d documents. Output saved to %s\n", docCount, outputPath)
 }
 
 func tokenize(text string) []string {
