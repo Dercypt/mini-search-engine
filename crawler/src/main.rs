@@ -112,49 +112,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(_) => return,
             };
 
-            let document = Html::parse_document(&html_text);
+            // Parse and extract within an isolated scope so !Send `Html` drops before any `.await`
+            let (title, content, outgoing_links) = {
+                let document = Html::parse_document(&html_text);
 
-            let title_selector = Selector::parse("title").unwrap();
-            let body_selector = Selector::parse(
-                "div.mw-parser-output > p, div.mw-parser-output h2, div.mw-parser-output h3",
-            )
-            .unwrap();
-            let link_selector = Selector::parse("a[href]").unwrap();
+                let title_selector = Selector::parse("title").unwrap();
+                let body_selector = Selector::parse(
+                    "div.mw-parser-output > p, div.mw-parser-output h2, div.mw-parser-output h3",
+                )
+                .unwrap();
+                let link_selector = Selector::parse("a[href]").unwrap();
 
-            let title = document
-                .select(&title_selector)
-                .next()
-                .map(|el| el.text().collect::<Vec<_>>().join(" "))
-                .unwrap_or_default()
-                .trim()
-                .to_string();
+                let title = document
+                    .select(&title_selector)
+                    .next()
+                    .map(|el| el.text().collect::<Vec<_>>().join(" "))
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
 
-            let content_pieces: Vec<String> = document
-                .select(&body_selector)
-                .map(|el| el.text().collect::<Vec<_>>().join(" ").trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
+                let content_pieces: Vec<String> = document
+                    .select(&body_selector)
+                    .map(|el| el.text().collect::<Vec<_>>().join(" ").trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
 
-            let content = content_pieces.join(" ");
+                let content = content_pieces.join(" ");
 
-            let mut outgoing_links = Vec::new();
-            let base_url = Url::parse("https://en.wikipedia.org").unwrap();
+                let mut outgoing_links = Vec::new();
+                let base_url = Url::parse("https://en.wikipedia.org").unwrap();
 
-            for element in document.select(&link_selector) {
-                if let Some(href) = element.value().attr("href") {
-                    if let Ok(resolved) = base_url.join(href) {
-                        if resolved.host_str() == Some("en.wikipedia.org") {
-                            if let Some(normalized) = normalize_url(resolved.as_str()) {
-                                let is_disallowed =
-                                    disallowed.iter().any(|re| re.is_match(&normalized));
-                                if !is_disallowed {
-                                    outgoing_links.push(normalized);
+                for element in document.select(&link_selector) {
+                    if let Some(href) = element.value().attr("href") {
+                        if let Ok(resolved) = base_url.join(href) {
+                            if resolved.host_str() == Some("en.wikipedia.org") {
+                                if let Some(normalized) = normalize_url(resolved.as_str()) {
+                                    let is_disallowed =
+                                        disallowed.iter().any(|re| re.is_match(&normalized));
+                                    if !is_disallowed {
+                                        outgoing_links.push(normalized);
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
+
+                (title, content, outgoing_links)
+            }; // <-- `document` is dropped here, making future Send-compliant
 
             let doc = Document {
                 id: hash_url(&current_url),
