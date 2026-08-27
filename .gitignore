@@ -1,11 +1,42 @@
 # OS Artifacts
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
 
-# Rust Build Artifacts
+# Rust Build & Cargo Artifacts
 target/
+**/target/
+**/*.rs.bk
+*.pdb
 
-# Scraped Data & Inverted Indices
+# Go / Binary Executables (if any microservices use Go)
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.bin
+
+# Scraped Data, Raw Crawls & Inverted Indices
 *.json
 *.jsonl
 *.csv
+*.tsv
+*.sqlite
+*.sqlite3
+*.db
+
+# Environment & Secret Files
+.env
+.env.*
+!.env.example
+
+# IDE & Editor Configurations
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
