@@ -4,6 +4,7 @@ use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, Semaphore, mpsc};
@@ -38,19 +39,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let max_pages = 1000;
     let seed_url = "https://en.wikipedia.org/wiki/Search_engine".to_string();
 
-    // Work frontier channel
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
-    // Bloom filter sized for ~10,000 expected URLs
     let bloom_filter = Arc::new(Mutex::new(
         BloomFilter::with_false_pos(0.001).expected_items(10_000),
     ));
     let saved_docs = Arc::new(Mutex::new(Vec::<Document>::new()));
-
-    // Politeness: Max 5 concurrent tasks
     let semaphore = Arc::new(Semaphore::new(5));
 
-    // Exclude Wikipedia utility pages
     let disallowed_patterns = vec![
         Regex::new(r"(?i)/w/index\.php").unwrap(),
         Regex::new(r"(?i)/wiki/(Special|Talk|User|Wikipedia|File|MediaWiki|Template|Template_talk|Help|Portal|Category):").unwrap(),
@@ -71,7 +67,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .timeout(Duration::from_secs(10))
         .build()?;
 
-    // Seed the frontier
     {
         let mut bloom = bloom_filter.lock().await;
         bloom.insert(&seed_url);
@@ -99,7 +94,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(async move {
             let _permit = permit;
 
-            // Polite request spacing
             sleep(Duration::from_millis(80)).await;
 
             let response = match client.get(&current_url).send().await {
@@ -112,16 +106,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(_) => return,
             };
 
-            // Parse and extract within an isolated scope so !Send `Html` drops before any `.await`
             let (title, content, outgoing_links) = {
                 let document = Html::parse_document(&html_text);
 
-                let title_selector = Selector::parse("title").unwrap();
-                let body_selector = Selector::parse(
-                    "div.mw-parser-output > p, div.mw-parser-output h2, div.mw-parser-output h3",
-                )
-                .unwrap();
-                let link_selector = Selector::parse("a[href]").unwrap();
+                let title_selector = Selector::parse("h1#firstHeading, title").unwrap();
+                // Descendant selector for all body text paragraphs
+                let body_selector =
+                    Selector::parse("div.mw-parser-output p, div#bodyContent p").unwrap();
+                // Scope links to the article body content area
+                let link_selector = Selector::parse("div#bodyContent a[href]").unwrap();
 
                 let title = document
                     .select(&title_selector)
@@ -134,12 +127,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let content_pieces: Vec<String> = document
                     .select(&body_selector)
                     .map(|el| el.text().collect::<Vec<_>>().join(" ").trim().to_string())
-                    .filter(|s| !s.is_empty())
+                    .filter(|s| s.len() > 20) // Skip empty/stub snippet strings
                     .collect();
 
                 let content = content_pieces.join(" ");
 
-                let mut outgoing_links = Vec::new();
+                let mut outgoing_set = HashSet::new();
                 let base_url = Url::parse("https://en.wikipedia.org").unwrap();
 
                 for element in document.select(&link_selector) {
@@ -147,10 +140,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Ok(resolved) = base_url.join(href) {
                             if resolved.host_str() == Some("en.wikipedia.org") {
                                 if let Some(normalized) = normalize_url(resolved.as_str()) {
-                                    let is_disallowed =
-                                        disallowed.iter().any(|re| re.is_match(&normalized));
-                                    if !is_disallowed {
-                                        outgoing_links.push(normalized);
+                                    // Skip self-links and unwanted namespace paths
+                                    if normalized != current_url
+                                        && !disallowed.iter().any(|re| re.is_match(&normalized))
+                                    {
+                                        outgoing_set.insert(normalized);
                                     }
                                 }
                             }
@@ -158,8 +152,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
+                let outgoing_links: Vec<String> = outgoing_set.into_iter().collect();
                 (title, content, outgoing_links)
-            }; // <-- `document` is dropped here, making future Send-compliant
+            };
+
+            // Avoid storing empty pages
+            if content.is_empty() {
+                return;
+            }
 
             let doc = Document {
                 id: hash_url(&current_url),
@@ -169,12 +169,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 links: outgoing_links.clone(),
             };
 
-            // Enqueue unseen links through the Bloom Filter
-            for link in outgoing_links {
+            for link in &outgoing_links {
                 let mut bloom = bloom_filter.lock().await;
-                if !bloom.contains(&link) {
-                    bloom.insert(&link);
-                    let _ = tx.send(link);
+                if !bloom.contains(link) {
+                    bloom.insert(link);
+                    let _ = tx.send(link.clone());
                 }
             }
 
@@ -186,7 +185,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Save final corpus
     let final_docs = saved_docs.lock().await.clone();
     let json_bytes = serde_json::to_vec_pretty(&final_docs)?;
     std::fs::write("documents.json", json_bytes)?;
