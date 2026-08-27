@@ -305,7 +305,7 @@ fn build_index(docs: &[RawDocument], pipeline: &TokenizerPipeline) -> IndexStore
         let internal_id = idx as u32;
 
         // Title terms receive double weight
-        let mut title_terms = pipeline.tokenize(&doc.Title_or_default(&doc.title));
+        let mut title_terms = pipeline.tokenize(&doc.title_or_default(&doc.title));
         let content_terms = pipeline.tokenize(&doc.content);
 
         let mut all_terms = Vec::with_capacity(title_terms.len() * 2 + content_terms.len());
@@ -362,11 +362,11 @@ fn build_index(docs: &[RawDocument], pipeline: &TokenizerPipeline) -> IndexStore
 }
 
 trait TitleHelper {
-    fn Title_or_default<'a>(&'a self, fallback: &'a str) -> &'a str;
+    fn title_or_default<'a>(&'a self, fallback: &'a str) -> &'a str;
 }
 
 impl TitleHelper for RawDocument {
-    fn Title_or_default<'a>(&'a self, fallback: &'a str) -> &'a str {
+    fn title_or_default<'a>(&'a self, fallback: &'a str) -> &'a str {
         if self.title.is_empty() {
             fallback
         } else {
