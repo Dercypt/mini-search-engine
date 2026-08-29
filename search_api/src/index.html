@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mini Search Engine</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    mark { background-color: #fef08a; color: #1e293b; padding: 0.1rem 0.25rem; border-radius: 0.2rem; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans antialiased">
+  <div class="max-w-4xl mx-auto px-4 py-12">
+    <!-- Header -->
+    <header class="text-center mb-8">
+      <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slate-800 border border-slate-700 text-xs font-medium text-emerald-400 mb-3">
+        <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+        Sub-millisecond Rust BM25 Engine
+      </div>
+      <h1 class="text-4xl font-extrabold tracking-tight bg-gradient-to-r from-blue-400 via-indigo-300 to-purple-400 bg-clip-text text-transparent">
+        Mini Search Engine
+      </h1>
+      <p class="text-slate-400 text-sm mt-1">High-performance crawler, inverted indexer, and low-latency search API</p>
+    </header>
+
+    <!-- Search Form -->
+    <form id="search-form" class="relative mb-6">
+      <div class="relative flex items-center">
+        <input
+          id="query-input"
+          type="text"
+          placeholder="Search 1,000+ Wikipedia articles (e.g., 'page rank algorithm')..."
+          class="w-full pl-5 pr-28 py-3.5 bg-slate-900 border border-slate-700 rounded-xl text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all shadow-lg"
+          autofocus
+        />
+        <button
+          type="submit"
+          class="absolute right-2 px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold rounded-lg transition-colors shadow-md"
+        >
+          Search
+        </button>
+      </div>
+    </form>
+
+    <!-- Stats Bar -->
+    <div id="stats-bar" class="hidden flex justify-between items-center text-xs text-slate-400 border-b border-slate-800 pb-3 mb-6">
+      <span id="stats-count"></span>
+      <span id="stats-time" class="text-emerald-400 font-mono"></span>
+    </div>
+
+    <!-- Results Container -->
+    <div id="results-list" class="space-y-6"></div>
+
+    <!-- Pagination Controls -->
+    <div id="pagination" class="hidden flex justify-center items-center gap-4 mt-10">
+      <button id="prev-btn" class="px-4 py-2 bg-slate-900 border border-slate-800 rounded-lg text-sm hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed">
+        &larr; Previous
+      </button>
+      <span id="page-info" class="text-xs text-slate-400"></span>
+      <button id="next-btn" class="px-4 py-2 bg-slate-900 border border-slate-800 rounded-lg text-sm hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed">
+        Next &rarr;
+      </button>
+    </div>
+  </div>
+
+  <script>
+    let currentQuery = '';
+    let currentPage = 1;
+    const limit = 10;
+
+    const form = document.getElementById('search-form');
+    const input = document.getElementById('query-input');
+    const resultsList = document.getElementById('results-list');
+    const statsBar = document.getElementById('stats-bar');
+    const statsCount = document.getElementById('stats-count');
+    const statsTime = document.getElementById('stats-time');
+    const pagination = document.getElementById('pagination');
+    const prevBtn = document.getElementById('prev-btn');
+    const nextBtn = document.getElementById('next-btn');
+    const pageInfo = document.getElementById('page-info');
+
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const q = input.value.trim();
+      if (!q) return;
+      currentQuery = q;
+      currentPage = 1;
+      executeSearch();
+    });
+
+    prevBtn.addEventListener('click', () => {
+      if (currentPage > 1) {
+        currentPage--;
+        executeSearch();
+      }
+    });
+
+    nextBtn.addEventListener('click', () => {
+      currentPage++;
+      executeSearch();
+    });
+
+    async function executeSearch() {
+      resultsList.innerHTML = '<div class="text-center text-slate-500 py-8">Searching index...</div>';
+      try {
+        const res = await fetch(`/api/search?q=${encodeURIComponent(currentQuery)}&page=${currentPage}&limit=${limit}`);
+        const data = await res.json();
+
+        statsBar.classList.remove('hidden');
+        statsCount.textContent = `About ${data.total_hits.toLocaleString()} results (Page ${data.page} of ${data.total_pages})`;
+        statsTime.textContent = `⚡ ${data.execution_time_ms} ms`;
+
+        if (data.results.length === 0) {
+          resultsList.innerHTML = '<div class="text-center text-slate-400 py-12">No documents found matching your query.</div>';
+          pagination.classList.add('hidden');
+          return;
+        }
+
+        resultsList.innerHTML = data.results.map(hit => `
+          <article class="p-4 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 transition-colors">
+            <div class="flex items-center gap-2 text-xs text-slate-500 mb-1">
+              <span class="font-mono text-indigo-400">#${hit.rank}</span>
+              <span>&bull;</span>
+              <span class="font-mono text-emerald-400/80">BM25: ${hit.score}</span>
+            </div>
+            <h2 class="text-lg font-semibold text-indigo-300 hover:text-indigo-200">
+              <a href="${hit.url}" target="_blank" rel="noopener noreferrer">${escapeHtml(hit.title)}</a>
+            </h2>
+            <p class="text-xs text-slate-400 font-mono break-all mb-2">${escapeHtml(hit.url)}</p>
+            <p class="text-sm text-slate-300 leading-relaxed">${highlightTerms(hit.snippet, currentQuery)}</p>
+          </article>
+        `).join('');
+
+        pagination.classList.remove('hidden');
+        pageInfo.textContent = `Page ${data.page} of ${data.total_pages}`;
+        prevBtn.disabled = data.page <= 1;
+        nextBtn.disabled = data.page >= data.total_pages;
+      } catch (err) {
+        resultsList.innerHTML = `<div class="text-center text-rose-400 py-8">Error loading search results.</div>`;
+      }
+    }
+
+    function escapeHtml(str) {
+      return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    function highlightTerms(text, query) {
+      const escaped = escapeHtml(text);
+      const terms = query.split(/\s+/).filter(t => t.length > 2);
+      if (terms.length === 0) return escaped;
+      const regex = new RegExp(`(${terms.map(t => t.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')).join('|')})`, 'gi');
+      return escaped.replace(regex, '<span class="text-yellow-300 font-semibold">$1</span>');
+    }
+  </script>
+</body>
+</html>

@@ -1,9 +1,9 @@
 use axum::{
+    Json, Router,
     extract::{Query, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{Html, IntoResponse},
     routing::get,
-    Json, Router,
 };
 use regex::Regex;
 use rust_stemmers::{Algorithm, Stemmer};
@@ -63,25 +63,180 @@ pub struct TokenizerPipeline {
 impl TokenizerPipeline {
     pub fn new() -> Self {
         let stop_words: HashSet<&'static str> = [
-            "a", "about", "above", "after", "again", "against", "all", "am", "an", "and",
-            "any", "are", "aren't", "as", "at", "be", "because", "been", "before", "being",
-            "below", "between", "both", "but", "by", "can't", "cannot", "could", "couldn't",
-            "did", "didn't", "do", "does", "doesn't", "doing", "don't", "down", "during",
-            "each", "few", "for", "from", "further", "had", "hadn't", "has", "hasn't", "have",
-            "haven't", "having", "he", "he'd", "he'll", "he's", "her", "here", "here's",
-            "hers", "herself", "him", "himself", "his", "how", "how's", "i", "i'd", "i'll",
-            "i'm", "i've", "if", "in", "into", "is", "isn't", "it", "it's", "its", "itself",
-            "let's", "me", "more", "most", "mustn't", "my", "myself", "no", "nor", "not", "of",
-            "off", "on", "once", "only", "or", "other", "ought", "our", "ours", "ourselves",
-            "out", "over", "own", "same", "shan't", "she", "she'd", "she'll", "she's",
-            "should", "shouldn't", "so", "some", "such", "than", "that", "that's", "the",
-            "their", "theirs", "them", "themselves", "then", "there", "there's", "these",
-            "they", "they'd", "they'll", "they're", "they've", "this", "those", "through",
-            "to", "too", "under", "until", "up", "very", "was", "wasn't", "we", "we'd", "we'll",
-            "we're", "we've", "were", "weren't", "what", "what's", "when", "when's", "where",
-            "where's", "which", "while", "who", "who's", "whom", "why", "why's", "with",
-            "won't", "would", "wouldn't", "you", "you'd", "you'll", "you're", "you've", "your",
-            "yours", "yourself", "yourselves",
+            "a",
+            "about",
+            "above",
+            "after",
+            "again",
+            "against",
+            "all",
+            "am",
+            "an",
+            "and",
+            "any",
+            "are",
+            "aren't",
+            "as",
+            "at",
+            "be",
+            "because",
+            "been",
+            "before",
+            "being",
+            "below",
+            "between",
+            "both",
+            "but",
+            "by",
+            "can't",
+            "cannot",
+            "could",
+            "couldn't",
+            "did",
+            "didn't",
+            "do",
+            "does",
+            "doesn't",
+            "doing",
+            "don't",
+            "down",
+            "during",
+            "each",
+            "few",
+            "for",
+            "from",
+            "further",
+            "had",
+            "hadn't",
+            "has",
+            "hasn't",
+            "have",
+            "haven't",
+            "having",
+            "he",
+            "he'd",
+            "he'll",
+            "he's",
+            "her",
+            "here",
+            "here's",
+            "hers",
+            "herself",
+            "him",
+            "himself",
+            "his",
+            "how",
+            "how's",
+            "i",
+            "i'd",
+            "i'll",
+            "i'm",
+            "i've",
+            "if",
+            "in",
+            "into",
+            "is",
+            "isn't",
+            "it",
+            "it's",
+            "its",
+            "itself",
+            "let's",
+            "me",
+            "more",
+            "most",
+            "mustn't",
+            "my",
+            "myself",
+            "no",
+            "nor",
+            "not",
+            "of",
+            "off",
+            "on",
+            "once",
+            "only",
+            "or",
+            "other",
+            "ought",
+            "our",
+            "ours",
+            "ourselves",
+            "out",
+            "over",
+            "own",
+            "same",
+            "shan't",
+            "she",
+            "she'd",
+            "she'll",
+            "she's",
+            "should",
+            "shouldn't",
+            "so",
+            "some",
+            "such",
+            "than",
+            "that",
+            "that's",
+            "the",
+            "their",
+            "theirs",
+            "them",
+            "themselves",
+            "then",
+            "there",
+            "there's",
+            "these",
+            "they",
+            "they'd",
+            "they'll",
+            "they're",
+            "they've",
+            "this",
+            "those",
+            "through",
+            "to",
+            "too",
+            "under",
+            "until",
+            "up",
+            "very",
+            "was",
+            "wasn't",
+            "we",
+            "we'd",
+            "we'll",
+            "we're",
+            "we've",
+            "were",
+            "weren't",
+            "what",
+            "what's",
+            "when",
+            "when's",
+            "where",
+            "where's",
+            "which",
+            "while",
+            "who",
+            "who's",
+            "whom",
+            "why",
+            "why's",
+            "with",
+            "won't",
+            "would",
+            "wouldn't",
+            "you",
+            "you'd",
+            "you'll",
+            "you're",
+            "you've",
+            "your",
+            "yours",
+            "yourself",
+            "yourselves",
         ]
         .into_iter()
         .collect();
@@ -157,15 +312,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let index_path = "../indexer/index.json";
-    let docs_path = "../crawler/documents.json";
+    let index_path =
+        std::env::var("INDEX_PATH").unwrap_or_else(|_| "../indexer/index.json".to_string());
+    let docs_path =
+        std::env::var("DOCS_PATH").unwrap_or_else(|_| "../crawler/documents.json".to_string());
 
     println!("Loading Inverted Index from {}...", index_path);
-    let index_file = File::open(index_path)?;
+    let index_file = File::open(&index_path)?;
     let index: IndexStore = serde_json::from_reader(BufReader::new(index_file))?;
 
     println!("Loading Raw Documents from {}...", docs_path);
-    let docs_file = File::open(docs_path)?;
+    let docs_file = File::open(&docs_path)?;
     let docs_vec: Vec<RawDocument> = serde_json::from_reader(BufReader::new(docs_file))?;
 
     let mut raw_docs_by_id = HashMap::with_capacity(docs_vec.len());
@@ -192,13 +349,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .allow_headers(Any);
 
     let app = Router::new()
+        .route("/", get(ui_handler))
         .route("/health", get(health_handler))
         .route("/api/search", get(search_handler))
         .layer(cors)
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
-    println!("Search API listening on http://localhost:8080");
+    println!("Search UI & API running at http://localhost:8080");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
@@ -207,6 +365,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // --- Handlers ---
+
+async fn ui_handler() -> Html<&'static str> {
+    Html(include_str!("index.html"))
+}
 
 async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(HealthResponse {
@@ -241,7 +403,6 @@ async fn search_handler(
 
     let start_time = Instant::now();
 
-    // 1. Tokenize query
     let query_terms = state.pipeline.tokenize(&query_str);
     if query_terms.is_empty() {
         return (
@@ -258,7 +419,6 @@ async fn search_handler(
         );
     }
 
-    // 2. BM25 Relevance Scoring
     let k1 = 1.5;
     let b = 0.75;
     let n = state.index.total_docs as f64;
@@ -289,7 +449,6 @@ async fn search_handler(
     let total_hits = ranked.len();
     let total_pages = (total_hits + limit - 1) / limit;
 
-    // 3. Pagination Window
     let offset = (page - 1) * limit;
     let paged_results = if offset < total_hits {
         ranked[offset..(offset + limit).min(total_hits)].to_vec()
@@ -297,7 +456,6 @@ async fn search_handler(
         Vec::new()
     };
 
-    // 4. Generate dynamic snippets with contextual window
     let mut hits = Vec::with_capacity(paged_results.len());
     let raw_query_words: Vec<&str> = query_str.split_whitespace().collect();
 
@@ -336,8 +494,6 @@ async fn search_handler(
     )
 }
 
-// --- Snippet Extractor ---
-
 fn generate_snippet(content: &str, query_words: &[&str], max_len: usize) -> String {
     if content.is_empty() {
         return String::new();
@@ -361,7 +517,6 @@ fn generate_snippet(content: &str, query_words: &[&str], max_len: usize) -> Stri
         None => 0,
     };
 
-    // Find clean word boundary
     let safe_start = if start_idx > 0 {
         content[start_idx..]
             .find(' ')
