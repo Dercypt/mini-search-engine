@@ -1,156 +1,1044 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Mini Search Engine</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <style>
-    mark { background-color: #fef08a; color: #1e293b; padding: 0.1rem 0.25rem; border-radius: 0.2rem; }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<title>mini search engine</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@1,9..144,500;1,9..144,600&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  /* ---------- Design Tokens ---------- */
+  :root {
+    --paper: #F7F6F2;
+    --paper-raised: #FFFFFF;
+    --ink: #121318;
+    --ink-soft: #636674;
+    --line: #E2E0D6;
+    --line-subtle: #ECEAE2;
+    --signal: #223CE9;
+    --signal-glow: rgba(34, 60, 233, 0.12);
+    --mark: #FCE588;
+    --live: #10B981;
+    --live-dim: rgba(16, 185, 129, 0.15);
+    --radius-sm: 6px;
+    --radius: 12px;
+    --radius-full: 9999px;
+    --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    --sans: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --serif: 'Fraunces', Georgia, serif;
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .wrap {
+    width: 100%;
+    max-width: 820px;
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+
+  a { color: inherit; text-decoration: none; }
+  button { font-family: inherit; }
+  :focus-visible { outline: 2px solid var(--signal); outline-offset: 3px; border-radius: 4px; }
+  svg { display: block; }
+  .icon { width: 18px; height: 18px; flex: 0 0 auto; }
+
+  /* ---------- Keyframe Animations ---------- */
+  @keyframes riseIn {
+    from { opacity: 0; transform: translateY(16px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes fadeDown {
+    from { opacity: 0; transform: translateY(-10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes blinkCaret { 50% { opacity: 0; } }
+  @keyframes growLine { to { transform: scaleX(1); } }
+  @keyframes pulseDot {
+    0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.5); }
+    70% { box-shadow: 0 0 0 7px rgba(16, 185, 129, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+  }
+  @keyframes scanBar {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(250%); }
+  }
+
+  /* ---------- Sticky Top Rail ---------- */
+  .rail {
+    position: sticky;
+    top: 0;
+    z-index: 40;
+    background: rgba(247, 246, 242, 0.92);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.3s var(--ease-out), box-shadow 0.3s var(--ease-out), background 0.3s var(--ease-out);
+    animation: fadeDown 0.5s var(--ease-out) both;
+  }
+  .rail.elevated {
+    border-color: var(--line);
+    box-shadow: 0 10px 30px -15px rgba(18, 19, 24, 0.08);
+  }
+  .rail-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    height: 68px;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: none;
+    border: none;
+    padding: 6px 8px;
+    margin-left: -8px;
+    border-radius: var(--radius-sm);
+    cursor: default;
+    color: inherit;
+    transition: background 0.2s var(--ease-out);
+  }
+  .brand[data-active="true"] { cursor: pointer; }
+  .brand[data-active="true"]:hover { background: var(--line-subtle); }
+
+  .brand-name {
+    font-family: var(--mono);
+    font-weight: 600;
+    font-size: 0.92rem;
+    letter-spacing: -0.01em;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .brand-name .icon {
+    width: 17px;
+    height: 17px;
+    color: var(--signal);
+  }
+  .brand-sub {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    color: var(--ink-soft);
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+  }
+
+  .rail-form-slot {
+    display: none;
+    flex: 1;
+    min-width: 0;
+    max-width: 480px;
+  }
+  body.post-search .rail-form-slot { display: flex; }
+
+  .rail-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    color: var(--ink-soft);
+    white-space: nowrap;
+    background: var(--paper-raised);
+    border: 1px solid var(--line);
+    padding: 5px 12px;
+    border-radius: var(--radius-full);
+  }
+  .live-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--live);
+    animation: pulseDot 2.2s ease-out infinite;
+  }
+
+  /* ---------- Unified Search Form ---------- */
+  .search-form {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    padding-bottom: 12px;
+  }
+  .search-form::after {
+    content: '';
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    height: 2px;
+    background: var(--ink);
+    transform-origin: left;
+    transform: scaleX(0);
+  }
+  #hero-form-slot .search-form::after { animation: growLine 0.65s var(--ease-out) 0.5s forwards; }
+  .rail-form-slot .search-form { padding-bottom: 6px; }
+  .rail-form-slot .search-form::after { height: 1px; background: var(--line); transform: scaleX(1); }
+  .rail-form-slot .search-form:focus-within::after { background: var(--signal); height: 2px; }
+
+  .search-form .icon { color: var(--ink-soft); transition: color 0.2s ease; }
+  .search-form:focus-within .icon { color: var(--signal); }
+
+  .search-form input {
+    flex: 1;
+    min-width: 0;
+    border: none;
+    background: none;
+    outline: none;
+    font-family: var(--sans);
+    color: var(--ink);
+    font-size: 1.15rem;
+    font-weight: 400;
+  }
+  .rail-form-slot .search-form input { font-size: 0.9rem; }
+  .search-form input::placeholder { color: #9A9CA6; font-weight: 400; }
+
+  .search-submit {
+    border: 1px solid var(--ink);
+    background: none;
+    color: var(--ink);
+    border-radius: var(--radius-full);
+    padding: 7px 18px;
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 0.74rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    transition: background 0.2s var(--ease-out), color 0.2s var(--ease-out), border-color 0.2s var(--ease-out), transform 0.2s var(--ease-out);
+  }
+  .search-submit:hover {
+    background: var(--ink);
+    color: var(--paper);
+    transform: translateY(-1px);
+  }
+  .rail-form-slot .search-submit { padding: 4px 12px; font-size: 0.66rem; }
+
+  /* ---------- Hero Section ---------- */
+  .hero {
+    min-height: 55vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 60px 24px 32px;
+    text-align: center;
+    transition: min-height 0.5s var(--ease-out), padding 0.5s var(--ease-out);
+  }
+  body.post-search .hero { min-height: 0; padding: 0; }
+
+  .hero-copy {
+    max-height: 600px;
+    overflow: hidden;
+    transition: max-height 0.45s var(--ease-out), opacity 0.35s ease, margin 0.45s var(--ease-out);
+    margin-bottom: 36px;
+  }
+  body.post-search .hero-copy { max-height: 0; opacity: 0; margin: 0; pointer-events: none; }
+
+  .hero-copy > * {
+    opacity: 0;
+    transform: translateY(16px);
+    animation: riseIn 0.6s var(--ease-out) forwards;
+  }
+  .hero-copy > *:nth-child(1) { animation-delay: 0.05s; }
+  .hero-copy > *:nth-child(2) { animation-delay: 0.15s; }
+  .hero-copy > *:nth-child(3) { animation-delay: 0.25s; }
+  .hero-copy > *:nth-child(4) { animation-delay: 0.38s; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    font-weight: 500;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    margin: 0 0 16px;
+  }
+  .wordmark {
+    font-family: var(--mono);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    font-size: clamp(1.85rem, 5.5vw, 2.75rem);
+    margin: 0 0 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+  }
+  .wordmark .icon { width: 0.9em; height: 0.9em; color: var(--signal); }
+  .caret {
+    display: inline-block;
+    width: 3px;
+    height: 1em;
+    background: var(--signal);
+    margin-left: 2px;
+    animation: blinkCaret 1s steps(1) infinite;
+  }
+
+  .subhead {
+    font-family: var(--sans);
+    font-size: 1.02rem;
+    line-height: 1.65;
+    color: var(--ink-soft);
+    max-width: 500px;
+    margin: 0 auto;
+  }
+
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    justify-content: center;
+    margin-top: 24px;
+  }
+  .chip {
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    padding: 8px 16px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-full);
+    background: var(--paper-raised);
+    color: var(--ink-soft);
+    cursor: pointer;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.02);
+    transition: border-color 0.2s ease, color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+  }
+  .chip:hover {
+    border-color: var(--signal);
+    color: var(--signal);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 10px var(--signal-glow);
+  }
+
+  #hero-form-slot {
+    width: 100%;
+    max-width: 580px;
+    margin: 0 auto;
+    opacity: 0;
+    transform: translateY(16px);
+    animation: riseIn 0.6s var(--ease-out) 0.32s forwards;
+  }
+  body.post-search #hero-form-slot { display: none; }
+
+  /* ---------- Results Section ---------- */
+  .results-section {
+    padding-top: 20px;
+    padding-bottom: 100px;
+    flex: 1;
+  }
+
+  .stats-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px 20px;
+    font-family: var(--mono);
+    font-size: 0.76rem;
+    color: var(--ink-soft);
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 14px;
+    margin-bottom: 24px;
+  }
+  .stats-left {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .count-num {
+    font-family: var(--serif);
+    font-style: italic;
+    font-weight: 600;
+    color: var(--ink);
+    font-size: 1.08rem;
+  }
+  .stats-demo {
+    color: #D97706;
+    background: #FEF3C7;
+    padding: 2px 8px;
+    border-radius: var(--radius-full);
+    font-size: 0.68rem;
+    font-weight: 500;
+  }
+  .stats-time {
+    color: var(--live);
+    font-weight: 600;
+    background: var(--live-dim);
+    padding: 3px 9px;
+    border-radius: var(--radius-full);
+  }
+
+  /* ---------- Loader & Empty States ---------- */
+  .loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    padding: 90px 20px;
+    font-family: var(--mono);
+    color: var(--ink-soft);
+    font-size: 0.86rem;
+  }
+  .loading .bar {
+    width: 140px;
+    height: 3px;
+    background: var(--line);
+    border-radius: var(--radius-full);
+    overflow: hidden;
+    position: relative;
+  }
+  .loading .bar::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    width: 45%;
+    background: var(--signal);
+    border-radius: var(--radius-full);
+    animation: scanBar 1.1s ease-in-out infinite;
+  }
+
+  .empty-state {
+    text-align: center;
+    padding: 80px 20px;
+    background: var(--paper-raised);
+    border: 1px dashed var(--line);
+    border-radius: var(--radius);
+  }
+  .empty-state h3 {
+    font-family: var(--mono);
+    font-size: 0.98rem;
+    font-weight: 600;
+    margin: 0 0 8px;
+  }
+  .empty-state p {
+    color: var(--ink-soft);
+    font-size: 0.92rem;
+    max-width: 400px;
+    margin: 0 auto;
+    line-height: 1.6;
+  }
+
+  /* ---------- Search Result Cards ---------- */
+  #results-list {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .card {
+    display: flex;
+    background: var(--paper-raised);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    overflow: hidden;
+    transition: transform 0.25s var(--ease-out), box-shadow 0.25s var(--ease-out), border-color 0.25s var(--ease-out), opacity 0.5s var(--ease-out);
+  }
+  .card.reveal {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  .card.reveal.is-visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  .card:hover, .card:focus-within {
+    transform: translateY(-2px);
+    box-shadow: 0 12px 28px -12px rgba(18, 19, 24, 0.12);
+    border-color: #B5B3A8;
+  }
+
+  .card-tab {
+    flex: 0 0 56px;
+    background: #F3F1EC;
+    border-right: 1px dashed var(--line);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 12px;
+    padding: 18px 0;
+  }
+  .card-rank {
+    font-family: var(--mono);
+    font-weight: 600;
+    font-size: 0.8rem;
+    color: var(--ink-soft);
+    letter-spacing: 0.02em;
+  }
+  .card-hole {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--paper);
+    border: 1px solid var(--line);
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.06);
+  }
+
+  .card-body {
+    flex: 1;
+    min-width: 0;
+    padding: 18px 22px;
+  }
+  .card-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.03em;
+    color: var(--ink-soft);
+    margin-bottom: 6px;
+  }
+  .card-score {
+    color: var(--signal);
+    font-weight: 600;
+    background: var(--signal-glow);
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+
+  .card-title {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin: 0 0 6px;
+    line-height: 1.35;
+  }
+  .card-title a {
+    text-decoration: none;
+    background-image: linear-gradient(var(--ink), var(--ink));
+    background-repeat: no-repeat;
+    background-position: 0 100%;
+    background-size: 0 1px;
+    transition: background-size 0.25s ease, color 0.2s ease;
+  }
+  .card-title a:hover {
+    background-size: 100% 1px;
+    color: var(--signal);
+  }
+
+  .card-url {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    color: #8C8E98;
+    margin: 0 0 10px;
+    word-break: break-all;
+  }
+  .card-snippet {
+    font-size: 0.92rem;
+    line-height: 1.62;
+    color: #373942;
+    margin: 0;
+  }
+
+  .hit {
+    background-color: var(--mark);
+    color: var(--ink);
+    font-weight: 600;
+    border-radius: 2px;
+    padding: 1px 3px;
+  }
+
+  /* ---------- Pagination ---------- */
+  .pagination {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    margin-top: 44px;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--ink-soft);
+  }
+  .page-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--paper-raised);
+    border: 1px solid var(--line);
+    padding: 8px 16px;
+    border-radius: var(--radius-full);
+    cursor: pointer;
+    color: var(--ink);
+    font-weight: 500;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.02);
+    transition: border-color 0.2s ease, background 0.2s ease, transform 0.2s ease;
+  }
+  .page-btn:hover:not(:disabled) {
+    border-color: var(--ink);
+    transform: translateY(-1px);
+  }
+  .page-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+    background: transparent;
+  }
+  .page-btn .icon { width: 14px; height: 14px; }
+
+  [hidden] { display: none !important; }
+
+  /* ---------- Back to Top Floating Button ---------- */
+  .top-btn {
+    position: fixed;
+    right: 24px;
+    bottom: 24px;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: var(--ink);
+    color: var(--paper);
+    border: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transform: translateY(12px);
+    pointer-events: none;
+    box-shadow: 0 10px 24px -8px rgba(18, 19, 24, 0.4);
+    transition: opacity 0.25s ease, transform 0.25s ease, background 0.2s ease;
+    z-index: 30;
+  }
+  .top-btn.visible {
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+  }
+  .top-btn:hover {
+    background: var(--signal);
+    transform: translateY(-2px);
+  }
+
+  /* ---------- Responsive Adjustments ---------- */
+  @media (max-width: 640px) {
+    .brand-sub { display: none; }
+    .wrap { padding-left: 16px; padding-right: 16px; }
+    .card-tab { flex-basis: 44px; padding: 14px 0; }
+    .card-body { padding: 14px 16px; }
+    .stats-bar { font-size: 0.72rem; }
+    .rail-status { padding: 4px 8px; font-size: 0.65rem; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+</style>
 </head>
-<body class="bg-slate-950 text-slate-100 min-h-screen font-sans antialiased">
-  <div class="max-w-4xl mx-auto px-4 py-12">
-    <!-- Header -->
-    <header class="text-center mb-8">
-      <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slate-800 border border-slate-700 text-xs font-medium text-emerald-400 mb-3">
-        <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-        Sub-millisecond Rust BM25 Engine
+<body>
+
+  <!-- Sticky Top Header Rail -->
+  <header class="rail" id="rail">
+    <div class="wrap rail-inner">
+      <button class="brand" id="brand" type="button" aria-label="Reset search to homepage">
+        <span class="brand-name">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><line x1="20" y1="20" x2="15.5" y2="15.5"/></svg>
+          mini_search
+        </span>
+        <span class="brand-sub">rust · bm25 · inverted index</span>
+      </button>
+
+      <div class="rail-form-slot" id="rail-form-slot"></div>
+
+      <div class="rail-status">
+        <span class="live-dot" aria-hidden="true"></span>
+        <span>index online</span>
       </div>
-      <h1 class="text-4xl font-extrabold tracking-tight bg-gradient-to-r from-blue-400 via-indigo-300 to-purple-400 bg-clip-text text-transparent">
-        Mini Search Engine
+    </div>
+  </header>
+
+  <!-- Hero Section -->
+  <section class="hero" id="hero">
+    <div class="hero-copy" id="hero-copy">
+      <p class="eyebrow">rust crawler · inverted index · bm25 ranking</p>
+      <h1 class="wordmark">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><line x1="20" y1="20" x2="15.5" y2="15.5"/></svg>
+        mini search engine<span class="caret" aria-hidden="true"></span>
       </h1>
-      <p class="text-slate-400 text-sm mt-1">High-performance crawler, inverted indexer, and low-latency search API</p>
-    </header>
-
-    <!-- Search Form -->
-    <form id="search-form" class="relative mb-6">
-      <div class="relative flex items-center">
-        <input
-          id="query-input"
-          type="text"
-          placeholder="Search 1,000+ Wikipedia articles (e.g., 'page rank algorithm')..."
-          class="w-full pl-5 pr-28 py-3.5 bg-slate-900 border border-slate-700 rounded-xl text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all shadow-lg"
-          autofocus
-        />
-        <button
-          type="submit"
-          class="absolute right-2 px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold rounded-lg transition-colors shadow-md"
-        >
-          Search
-        </button>
+      <p class="subhead">A from-scratch information retrieval engine tuned for sub-millisecond lookups across 1,000+ Wikipedia articles.</p>
+      <div class="chips" id="chips">
+        <button class="chip" type="button">page rank</button>
+        <button class="chip" type="button">quantum entanglement</button>
+        <button class="chip" type="button">roman empire</button>
+        <button class="chip" type="button">neural network</button>
       </div>
-    </form>
-
-    <!-- Stats Bar -->
-    <div id="stats-bar" class="hidden flex justify-between items-center text-xs text-slate-400 border-b border-slate-800 pb-3 mb-6">
-      <span id="stats-count"></span>
-      <span id="stats-time" class="text-emerald-400 font-mono"></span>
     </div>
 
-    <!-- Results Container -->
-    <div id="results-list" class="space-y-6"></div>
-
-    <!-- Pagination Controls -->
-    <div id="pagination" class="hidden flex justify-center items-center gap-4 mt-10">
-      <button id="prev-btn" class="px-4 py-2 bg-slate-900 border border-slate-800 rounded-lg text-sm hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed">
-        &larr; Previous
-      </button>
-      <span id="page-info" class="text-xs text-slate-400"></span>
-      <button id="next-btn" class="px-4 py-2 bg-slate-900 border border-slate-800 rounded-lg text-sm hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed">
-        Next &rarr;
-      </button>
+    <div id="hero-form-slot">
+      <form id="search-form" class="search-form" autocomplete="off">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><line x1="20" y1="20" x2="15.5" y2="15.5"/></svg>
+        <input id="query-input" type="text" name="q" placeholder="search 1,000+ wikipedia articles (press '/' to focus)…" aria-label="Search query" autofocus>
+        <button type="submit" class="search-submit">search</button>
+      </form>
     </div>
-  </div>
+  </section>
 
-  <script>
-    let currentQuery = '';
-    let currentPage = 1;
-    const limit = 10;
+  <!-- Search Results Section -->
+  <main class="wrap results-section" id="results-section" hidden>
+    <div class="stats-bar" id="stats-bar" hidden>
+      <div class="stats-left">
+        <span><span class="count-num" id="stats-count-num">0</span> results</span>
+        <span id="stats-page"></span>
+        <span class="stats-demo" id="stats-demo" hidden>offline fallback data</span>
+      </div>
+      <span class="stats-time" id="stats-time"></span>
+    </div>
 
-    const form = document.getElementById('search-form');
-    const input = document.getElementById('query-input');
-    const resultsList = document.getElementById('results-list');
-    const statsBar = document.getElementById('stats-bar');
-    const statsCount = document.getElementById('stats-count');
-    const statsTime = document.getElementById('stats-time');
-    const pagination = document.getElementById('pagination');
-    const prevBtn = document.getElementById('prev-btn');
-    const nextBtn = document.getElementById('next-btn');
-    const pageInfo = document.getElementById('page-info');
+    <div id="results-list"></div>
 
-    form.addEventListener('submit', (e) => {
+    <nav class="pagination" id="pagination" aria-label="Search Pagination" hidden>
+      <button class="page-btn" id="prev-btn" type="button">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+        prev
+      </button>
+      <span id="page-pos"></span>
+      <button class="page-btn" id="next-btn" type="button">
+        next
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>
+    </nav>
+  </main>
+
+  <!-- Floating Scroll To Top -->
+  <button class="top-btn" id="top-btn" type="button" aria-label="Back to top">
+    <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>
+  </button>
+
+<script>
+  const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const limit = 10;
+  let currentQuery = '';
+  let currentPage = 1;
+  let hasSearched = false;
+  let lastTotalPages = 1;
+
+  const rail = document.getElementById('rail');
+  const brand = document.getElementById('brand');
+  const heroFormSlot = document.getElementById('hero-form-slot');
+  const railFormSlot = document.getElementById('rail-form-slot');
+  const heroCopy = document.getElementById('hero-copy');
+  const form = document.getElementById('search-form');
+  const input = document.getElementById('query-input');
+  const resultsSection = document.getElementById('results-section');
+  const resultsList = document.getElementById('results-list');
+  const statsBar = document.getElementById('stats-bar');
+  const statsCountNum = document.getElementById('stats-count-num');
+  const statsPage = document.getElementById('stats-page');
+  const statsDemo = document.getElementById('stats-demo');
+  const statsTime = document.getElementById('stats-time');
+  const pagination = document.getElementById('pagination');
+  const prevBtn = document.getElementById('prev-btn');
+  const nextBtn = document.getElementById('next-btn');
+  const pagePos = document.getElementById('page-pos');
+  const topBtn = document.getElementById('top-btn');
+
+  /* ---------- Offline Mock Corpus (Fallback only) ---------- */
+  const MOCK_DOCS = [
+    { title:'PageRank', url:'https://en.wikipedia.org/wiki/PageRank', snippet:"An algorithm Google's founders used to rank web pages by weighing how many other pages link to them and how important those linking pages are themselves." },
+    { title:'Okapi BM25', url:'https://en.wikipedia.org/wiki/Okapi_BM25', snippet:'A ranking function search engines use to estimate document relevance to a query, building on term frequency and inverse document frequency.' },
+    { title:'Inverted index', url:'https://en.wikipedia.org/wiki/Inverted_index', snippet:'A data structure that maps each word in a collection of documents to the list of documents it appears in, making fast full-text search possible.' },
+    { title:'Tf–idf', url:'https://en.wikipedia.org/wiki/Tf-idf', snippet:'A statistic reflecting how important a word is to a document within a larger collection, balancing how often it appears against how common it is overall.' },
+    { title:'Rust (programming language)', url:'https://en.wikipedia.org/wiki/Rust_(programming_language)', snippet:'A systems programming language focused on memory safety and speed, often chosen for building fast, reliable infrastructure like crawlers and search backends.' },
+    { title:'Artificial neural network', url:'https://en.wikipedia.org/wiki/Artificial_neural_network', snippet:'A computing system loosely inspired by the brain, made of interconnected nodes that learn to recognize patterns from examples rather than fixed rules.' },
+    { title:'Quantum entanglement', url:'https://en.wikipedia.org/wiki/Quantum_entanglement', snippet:'A phenomenon where two or more particles become linked so that measuring one instantly affects the predicted state of the other, regardless of distance.' },
+    { title:'Roman Empire', url:'https://en.wikipedia.org/wiki/Roman_Empire', snippet:'The post-Republican period of ancient Rome, spanning centuries of territorial expansion, engineering achievement, and political upheaval across three continents.' }
+  ];
+
+  function mockSearch(query, page, lim) {
+    return new Promise(resolve => {
+      const delay = 180 + Math.random() * 120;
+      setTimeout(() => {
+        const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+        const scored = MOCK_DOCS.map(doc => {
+          const titleL = doc.title.toLowerCase();
+          const snippetL = doc.snippet.toLowerCase();
+          let score = 0;
+          terms.forEach(t => {
+            if (titleL.includes(t)) score += 4.2;
+            const occurrences = snippetL.split(t).length - 1;
+            score += occurrences * 1.1;
+          });
+          return { doc, score };
+        }).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
+
+        const total_hits = scored.length;
+        const total_pages = Math.max(1, Math.ceil(total_hits / lim));
+        const start = (page - 1) * lim;
+        const results = scored.slice(start, start + lim).map((x, i) => ({
+          rank: start + i + 1,
+          score: x.score.toFixed(4),
+          title: x.doc.title,
+          url: x.doc.url,
+          snippet: x.doc.snippet
+        }));
+
+        resolve({
+          total_hits,
+          page,
+          total_pages,
+          execution_time_ms: (0.18 + Math.random() * 0.4).toFixed(2),
+          results
+        });
+      }, delay);
+    });
+  }
+
+  async function runSearch(query, page, lim) {
+    try {
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(), 2000);
+      const res = await fetch(`/api/search?q=${encodeURIComponent(query)}&page=${page}&limit=${lim}`, { signal: controller.signal });
+      clearTimeout(t);
+      if (!res.ok) throw new Error('non-200 response');
+      const data = await res.json();
+      return { data, demo: false };
+    } catch (_) {
+      const data = await mockSearch(query, page, lim);
+      return { data, demo: true };
+    }
+  }
+
+  /* ---------- Utility Helpers ---------- */
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function escapeRegExp(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function highlightTerms(text, query) {
+    const escaped = escapeHtml(text);
+    const terms = [...new Set(query.split(/\s+/).filter(t => t.length > 1))].map(escapeRegExp);
+    if (!terms.length) return escaped;
+    const regex = new RegExp(`(${terms.join('|')})`, 'gi');
+    return escaped.replace(regex, '<mark class="hit">$1</mark>');
+  }
+
+  function domainFrom(url) {
+    try { return new URL(url).hostname.replace(/^www\./, ''); }
+    catch (_) { return url; }
+  }
+
+  function animateCount(el, target) {
+    if (prefersReduced) { el.textContent = target.toLocaleString(); return; }
+    const start = performance.now();
+    const duration = 500;
+    function tick(now) {
+      const p = Math.min((now - start) / duration, 1);
+      const eased = 1 - Math.pow(1 - p, 3);
+      el.textContent = Math.round(eased * target).toLocaleString();
+      if (p < 1) requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  }
+
+  const io = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('is-visible');
+        io.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.08, rootMargin: '0px 0px -20px 0px' });
+
+  /* ---------- HTML Renderers ---------- */
+  function loadingHTML() {
+    return `<div class="loading"><span>Searching inverted index…</span><span class="bar"></span></div>`;
+  }
+
+  function emptyHTML(query) {
+    return `<div class="empty-state">
+      <h3>No matches for "${escapeHtml(query)}"</h3>
+      <p>The index does not contain matching tokens for this query. Try a term from the suggestions above or a different keyword.</p>
+    </div>`;
+  }
+
+  function cardHTML(hit, idx, query) {
+    const domain = domainFrom(hit.url);
+    const delay = Math.min(idx, 8) * 40;
+    return `<article class="card reveal" style="transition-delay:${delay}ms">
+      <div class="card-tab">
+        <span class="card-rank">${String(hit.rank).padStart(2, '0')}</span>
+        <span class="card-hole" aria-hidden="true"></span>
+      </div>
+      <div class="card-body">
+        <div class="card-meta">
+          <span class="card-score">BM25: ${hit.score}</span>
+          <span aria-hidden="true">·</span>
+          <span class="card-domain">${escapeHtml(domain)}</span>
+        </div>
+        <h2 class="card-title"><a href="${escapeHtml(hit.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(hit.title)}</a></h2>
+        <p class="card-url">${escapeHtml(hit.url)}</p>
+        <p class="card-snippet">${highlightTerms(hit.snippet, query)}</p>
+      </div>
+    </article>`;
+  }
+
+  function renderResults(data, demo) {
+    statsBar.hidden = false;
+    animateCount(statsCountNum, data.total_hits);
+    statsPage.textContent = `Page ${String(data.page).padStart(2, '0')} / ${String(data.total_pages).padStart(2, '0')}`;
+    statsTime.textContent = `⚡ ${data.execution_time_ms} ms`;
+    statsDemo.hidden = !demo;
+    lastTotalPages = data.total_pages;
+
+    if (!data.results.length) {
+      resultsList.innerHTML = emptyHTML(currentQuery);
+      pagination.hidden = true;
+      return;
+    }
+
+    resultsList.innerHTML = data.results.map((hit, i) => cardHTML(hit, i, currentQuery)).join('');
+    resultsList.querySelectorAll('.card').forEach(card => io.observe(card));
+
+    pagination.hidden = false;
+    pagePos.textContent = `${String(data.page).padStart(2, '0')} — ${String(data.total_pages).padStart(2, '0')}`;
+    prevBtn.disabled = data.page <= 1;
+    nextBtn.disabled = data.page >= data.total_pages;
+  }
+
+  async function executeSearch() {
+    resultsList.innerHTML = loadingHTML();
+    pagination.hidden = true;
+    const { data, demo } = await runSearch(currentQuery, currentPage, limit);
+    renderResults(data, demo);
+  }
+
+  function goToPage(p) {
+    currentPage = p;
+    executeSearch().then(() => {
+      resultsSection.scrollIntoView({ behavior: prefersReduced ? 'auto' : 'smooth', block: 'start' });
+    });
+  }
+
+  /* ---------- FLIP Animation Transition ---------- */
+  function transitionToResults() {
+    const first = form.getBoundingClientRect();
+
+    document.body.classList.add('post-search');
+    railFormSlot.appendChild(form);
+
+    const last = form.getBoundingClientRect();
+    const dx = first.left - last.left;
+    const dy = first.top - last.top;
+    const sx = first.width / last.width;
+    const sy = first.height / last.height;
+
+    if (prefersReduced || !last.width || !last.height) {
+      resultsSection.hidden = false;
+      return;
+    }
+
+    form.style.transformOrigin = 'top left';
+    form.style.transition = 'none';
+    form.style.transform = `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`;
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        form.style.transition = 'transform 480ms var(--ease-out)';
+        form.style.transform = 'translate(0,0) scale(1,1)';
+      });
+    });
+
+    form.addEventListener('transitionend', function cleanup() {
+      form.style.transition = '';
+      form.style.transform = '';
+      form.removeEventListener('transitionend', cleanup);
+    }, { once: true });
+
+    resultsSection.hidden = false;
+  }
+
+  function resetToHero() {
+    hasSearched = false;
+    currentQuery = '';
+    currentPage = 1;
+    input.value = '';
+    brand.dataset.active = 'false';
+    document.body.classList.remove('post-search');
+    heroFormSlot.appendChild(form);
+    form.style.transform = '';
+    form.style.transition = '';
+    resultsSection.hidden = true;
+    statsBar.hidden = true;
+    pagination.hidden = true;
+    resultsList.innerHTML = '';
+    input.focus();
+  }
+
+  /* ---------- Event Listeners ---------- */
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const q = input.value.trim();
+    if (!q) return;
+    currentQuery = q;
+    currentPage = 1;
+    if (!hasSearched) {
+      hasSearched = true;
+      brand.dataset.active = 'true';
+      transitionToResults();
+    }
+    executeSearch();
+  });
+
+  document.querySelectorAll('.chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      input.value = chip.textContent;
+      form.requestSubmit();
+    });
+  });
+
+  prevBtn.addEventListener('click', () => { if (currentPage > 1) goToPage(currentPage - 1); });
+  nextBtn.addEventListener('click', () => { if (currentPage < lastTotalPages) goToPage(currentPage + 1); });
+
+  brand.addEventListener('click', () => { if (hasSearched) resetToHero(); });
+
+  window.addEventListener('scroll', () => {
+    rail.classList.toggle('elevated', window.scrollY > 4);
+    topBtn.classList.toggle('visible', window.scrollY > 420);
+  }, { passive: true });
+
+  topBtn.addEventListener('click', () => {
+    window.scrollTo({ top: 0, behavior: prefersReduced ? 'auto' : 'smooth' });
+  });
+
+  // Shortcut key handling
+  window.addEventListener('keydown', (e) => {
+    if (e.key === '/' && document.activeElement !== input) {
       e.preventDefault();
-      const q = input.value.trim();
-      if (!q) return;
-      currentQuery = q;
-      currentPage = 1;
-      executeSearch();
-    });
-
-    prevBtn.addEventListener('click', () => {
-      if (currentPage > 1) {
-        currentPage--;
-        executeSearch();
-      }
-    });
-
-    nextBtn.addEventListener('click', () => {
-      currentPage++;
-      executeSearch();
-    });
-
-    async function executeSearch() {
-      resultsList.innerHTML = '<div class="text-center text-slate-500 py-8">Searching index...</div>';
-      try {
-        const res = await fetch(`/api/search?q=${encodeURIComponent(currentQuery)}&page=${currentPage}&limit=${limit}`);
-        const data = await res.json();
-
-        statsBar.classList.remove('hidden');
-        statsCount.textContent = `About ${data.total_hits.toLocaleString()} results (Page ${data.page} of ${data.total_pages})`;
-        statsTime.textContent = `⚡ ${data.execution_time_ms} ms`;
-
-        if (data.results.length === 0) {
-          resultsList.innerHTML = '<div class="text-center text-slate-400 py-12">No documents found matching your query.</div>';
-          pagination.classList.add('hidden');
-          return;
-        }
-
-        resultsList.innerHTML = data.results.map(hit => `
-          <article class="p-4 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 transition-colors">
-            <div class="flex items-center gap-2 text-xs text-slate-500 mb-1">
-              <span class="font-mono text-indigo-400">#${hit.rank}</span>
-              <span>&bull;</span>
-              <span class="font-mono text-emerald-400/80">BM25: ${hit.score}</span>
-            </div>
-            <h2 class="text-lg font-semibold text-indigo-300 hover:text-indigo-200">
-              <a href="${hit.url}" target="_blank" rel="noopener noreferrer">${escapeHtml(hit.title)}</a>
-            </h2>
-            <p class="text-xs text-slate-400 font-mono break-all mb-2">${escapeHtml(hit.url)}</p>
-            <p class="text-sm text-slate-300 leading-relaxed">${highlightTerms(hit.snippet, currentQuery)}</p>
-          </article>
-        `).join('');
-
-        pagination.classList.remove('hidden');
-        pageInfo.textContent = `Page ${data.page} of ${data.total_pages}`;
-        prevBtn.disabled = data.page <= 1;
-        nextBtn.disabled = data.page >= data.total_pages;
-      } catch (err) {
-        resultsList.innerHTML = `<div class="text-center text-rose-400 py-8">Error loading search results.</div>`;
-      }
+      input.focus();
+      input.select();
+    } else if (e.key === 'Escape' && hasSearched && document.activeElement === input) {
+      resetToHero();
     }
-
-    function escapeHtml(str) {
-      return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    }
-
-    function highlightTerms(text, query) {
-      const escaped = escapeHtml(text);
-      const terms = query.split(/\s+/).filter(t => t.length > 2);
-      if (terms.length === 0) return escaped;
-      const regex = new RegExp(`(${terms.map(t => t.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')).join('|')})`, 'gi');
-      return escaped.replace(regex, '<span class="text-yellow-300 font-semibold">$1</span>');
-    }
-  </script>
+  });
+</script>
 </body>
 </html>
