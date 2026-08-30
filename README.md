@@ -1,111 +1,82 @@
-# ⚡ Mini Search Engine
+# Mini Search Engine
 
-A high-performance, modular search engine pipeline built entirely in **Rust**. Scrapes thousands of Wikipedia articles concurrently, builds an in-memory inverted index with **Roaring Bitmaps**, ranks documents using **Okapi BM25**, and serves search queries with sub-millisecond latency via an **Axum REST API** and embedded web interface.
+A lightweight, from-scratch search engine built in Rust. Features an asynchronous crawler, an in-memory inverted index, and sub-millisecond retrieval ranked via Okapi BM25.
 
----
-
-## 🏗️ Architecture Overview
-
-[ Wikipedia Seed ]
-        │
-        ▼
-[ 1. Concurrent Crawler (/crawler) ]
-  • Tokio Async Tasks & Semaphore Concurrency
-  • FastBloom Filter Deduplication (0.1% FP)
-  • Output: documents.json
-        │
-        ▼
-[ 2. Inverted Indexer (/indexer) ]
-  • Porter Stemmer & Stop-Word Filtering
-  • Roaring Bitmaps for Fast Document Set Lookups
-  • Precomputed Okapi BM25 IDF and Statistics
-  • Output: index.json
-        │
-        ▼
-[ 3. Search API & Web UI (/search_api) ]
-  • Axum High-Performance HTTP Server
-  • Dynamic Snippet Extraction & Query Term Highlighting
-  • REST API: GET /api/search?q=...
-  • Built-in Web UI: http://localhost:8080
+[Live Demo](https://mini-search-engine-ijmt.onrender.com/)
 
 ---
 
-## 🚀 Quickstart
+## Features
 
-### Option 1: Automated Shell Pipeline
-Run the crawler, indexer, and search server sequentially with a single command:
-./run_pipeline.sh
+* **Async Crawler:** Concurrent web scraper powered by `tokio` and `reqwest`.
+* **Inverted Index:** In-memory postings list with Porter stemming and token normalization.
+* **BM25 Ranking:** Relevance scoring ($k_1 = 1.2, b = 0.75$) matching corpus rarity.
+* **Embedded UI:** Single-binary web interface and JSON API served via `axum`.
+* **Sub-Millisecond Speed:** Sub-millisecond query latency directly against memory.
 
-### Option 2: Docker Compose
+---
+
+## Quickstart
+
+### Option 1: With Docker
+
+```bash
+git clone https://github.com/Dercypt/mini-search-engine.git
+cd mini-search-engine
 docker compose up --build
+```
+Open `http://localhost:8080`.
 
-Once started, navigate to **http://localhost:8080** in your browser.
+### Option 2: Manual Build
+
+```bash
+# 1. Scrape Wikipedia
+cd crawler && cargo run --release && cd ..
+
+# 2. Build inverted index
+cd indexer && cargo run --release && cd ..
+
+# 3. Serve API & Web UI
+cd search_api && cargo run --release
+```
 
 ---
 
-## 📊 Performance Benchmarks
+## API
 
-| Metric | Measured Value |
-|---|---|
-| **Crawl Throughput (1,000 Articles)** | ~40 seconds |
-| **Inverted Index Construction** | ~230 ms |
-| **Vocabulary Size** | 40,000+ unique stems |
-| **Average Document Length** | ~1,790 terms/doc |
-| **Average Query Latency** | **< 0.5 ms** |
+HTTP: `GET /api/search?q=rust&page=1&limit=10`
 
----
-
-## 🔌 API Reference
-
-### `GET /api/search`
-Query the search engine with BM25 ranking, dynamic snippets, and pagination.
-
-#### Query Parameters
-* `q` (string, required): The search terms.
-* `page` (integer, optional): Page number (default: `1`).
-* `limit` (integer, optional): Results per page (default: `10`, max: `100`).
-
-#### Example Request
-curl -s "http://localhost:8080/api/search?q=page+rank+algorithm&limit=1" | jq
-
-#### Example Response
+JSON:
+```json
 {
-  "query": "page rank algorithm",
-  "total_hits": 514,
+  "total_hits": 18,
   "page": 1,
-  "limit": 1,
-  "total_pages": 514,
-  "execution_time_ms": 0.45,
+  "total_pages": 2,
+  "execution_time_ms": "0.38",
   "results": [
     {
       "rank": 1,
-      "doc_id": "b3ed93c031fd",
-      "score": 9.4571,
-      "title": "PageRank - Wikipedia",
-      "url": "https://en.wikipedia.org/wiki/PageRank",
-      "snippet": "PageRank ( PR ) is an algorithm used by Google Search to rank web pages in their search engine results. It is named after both the term \"web page\" and co-founder Larry Page . PageRank is..."
+      "score": "6.4210",
+      "title": "Rust (programming language)",
+      "url": "[https://en.wikipedia.org/wiki/Rust_(programming_language](https://en.wikipedia.org/wiki/Rust_(programming_language))",
+      "snippet": "A systems programming language focused on memory safety and performance..."
     }
   ]
 }
-
-### `GET /health`
-Returns system health and index metrics.
-
-#### Example Request
-curl -s http://localhost:8080/health | jq
-
-#### Example Response
-{
-  "status": "healthy",
-  "total_documents": 1000,
-  "vocabulary_size": 40980
-}
+```
 
 ---
 
-## 🛠️ Tech Stack & Crates
+## Architecture
 
-* **Networking & Concurrency:** `tokio`, `reqwest`, `axum`, `tower-http`
-* **Parsing & Scraping:** `scraper`, `regex`, `url`
-* **Text Processing & IR:** `rust-stemmers`, `roaring` (Roaring Bitmaps), `fastbloom`
-* **Serialization:** `serde`, `serde_json`, `bincode`, `sha2`, `hex`
+```bash
+crawler/      Scrapes Wikipedia articles -> documents.json
+indexer/      Parses documents and builds -> index.json
+search_api/   In-memory BM25 ranker + Axum web interface
+```
+
+---
+
+## License
+
+[MIT](LICENSE)
