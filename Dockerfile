@@ -14,7 +14,7 @@ RUN cd crawler && ./target/release/crawler
 RUN cd indexer && ./target/release/indexer
 
 # Runtime Stage
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
