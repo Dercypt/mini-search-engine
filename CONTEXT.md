@@ -6,17 +6,17 @@ A custom, high-performance web search engine built from scratch in Rust (2024 Ed
 ---
 
 ## Phase Status Summary
-- **Phase 1: Web Crawler (`/crawler`)** — **COMPLETE**
-- **Phase 2: Inverted Indexer & Ranking Engine (`/indexer`)** — **COMPLETE**
-- **Phase 3: Query Engine & REST API (`/search_api`)** — **COMPLETE**
-- **Phase 4: Embedded UI, Containerization & Production Deployment** — **COMPLETE**
-- **Phase 5: Algorithmic Search Enhancements (FST, Fuzzy & Dynamic Snippets)** — **IN PROGRESS**
-- **Phase 6: Hybrid Retrieval (Dense Vector + BM25)** — **UPCOMING**
-- **Phase 7: Benchmarking, CI/CD & Production Polish** — **UPCOMING**
+- Phase 1: Web Crawler (`/crawler`) — **COMPLETE**
+- Phase 2: Inverted Indexer & Ranking Engine (`/indexer`) — **COMPLETE**
+- Phase 3: Query Engine & REST API (`/search_api`) — **COMPLETE**
+- Phase 4: Embedded UI, Containerization & Production Deployment — **COMPLETE**
+- Phase 5: Algorithmic Search Enhancements (FST, Fuzzy & Dynamic Snippets) — **IN PROGRESS**
+- Phase 6: Hybrid Retrieval (Dense Vector + BM25) — **UPCOMING**
+- Phase 7: Benchmarking, CI/CD & Production Polish — **UPCOMING**
 
 ---
 
-## Phase 1 Architecture (`/crawler`)
+## Phase 1 (`/crawler`)
 
 ### 1. Objective
 Traverse web pages starting from a seed URL, parse structured metadata and full body text, capture outbound link graphs, filter administrative noise, and persist normalized document snapshots.
@@ -38,7 +38,7 @@ Traverse web pages starting from a seed URL, parse structured metadata and full 
 
 ---
 
-## Phase 2 Architecture (`/indexer`)
+## Phase 2 (`/indexer`)
 
 ### 1. Objective
 Parse raw document JSON corpora, run text preprocessing (tokenization, lowercasing, stop-word elimination, Porter stemming), construct an inverted index mapping stemmed terms to document IDs and term frequencies, score documents via Okapi BM25, and serialize the index to disk.
@@ -75,7 +75,7 @@ Parse raw document JSON corpora, run text preprocessing (tokenization, lowercasi
 
 ---
 
-## Phase 3 Architecture (`/search_api`)
+## Phase 3 (`/search_api`)
 
 ### 1. Objective
 Expose high-performance, asynchronous REST endpoints that accept user queries, parse search terms through an identical tokenization/stemming pipeline, score candidates against the in-memory inverted index using Okapi BM25, extract contextual preview snippets, and return paginated JSON search results with sub-millisecond execution times.
@@ -106,7 +106,7 @@ Expose high-performance, asynchronous REST endpoints that accept user queries, p
 
 ---
 
-## Phase 4 Architecture (UI, Dockerization & Production Deployment)
+## Phase 4 (UI, Dockerization & Production Deployment)
 
 ### 1. Objective
 Build an embedded, zero-dependency responsive frontend interface directly inside the single binary, package the entire build and pipeline into a reproducible multi-stage Docker environment, deploy the live service to Render, and write minimalist, production-ready documentation.
@@ -137,7 +137,7 @@ Build an embedded, zero-dependency responsive frontend interface directly inside
 
 ---
 
-## Phase 5 Architecture: Algorithmic Search Enhancements — *CURRENT*
+## Phase 5 (Algorithmic Search Enhancements) — *CURRENT*
 
 ### 1. Objective
 Enhance search ergonomics and recall by implementing zero-overhead prefix autocomplete, microsecond Levenshtein typo correction, and single-pass multi-pattern dynamic snippet extraction.
