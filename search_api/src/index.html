@@ -22,6 +22,9 @@
     --mark: #FCE588;
     --live: #10B981;
     --live-dim: rgba(16, 185, 129, 0.15);
+    --warn-bg: #FEF3C7;
+    --warn-border: #FCD34D;
+    --warn-ink: #92400E;
     --radius-sm: 6px;
     --radius: 12px;
     --radius-full: 9999px;
@@ -141,6 +144,7 @@
     flex: 1;
     min-width: 0;
     max-width: 460px;
+    position: relative;
   }
   body.post-search .rail-form-slot { display: flex; }
 
@@ -166,7 +170,7 @@
     animation: pulseDot 2.2s ease-out infinite;
   }
 
-  /* ---------- Unified Search Form ---------- */
+  /* ---------- Unified Search Form & Autocomplete ---------- */
   .search-form {
     position: relative;
     display: flex;
@@ -228,6 +232,43 @@
     color: var(--paper);
   }
   .rail-form-slot .search-submit { padding: 4px 12px; font-size: 0.68rem; min-height: 30px; }
+
+  /* ---------- Suggestion Popover (FST Autocomplete) ---------- */
+  .suggestions-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    right: 0;
+    background: var(--paper-raised);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    box-shadow: 0 12px 28px -8px rgba(18, 19, 24, 0.12);
+    list-style: none;
+    margin: 0;
+    padding: 6px 0;
+    z-index: 60;
+    display: none;
+  }
+  .suggestions-menu.open { display: block; }
+  .suggestion-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 14px;
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    color: var(--ink-soft);
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+  .suggestion-item:hover, .suggestion-item.selected {
+    background: var(--signal-glow);
+    color: var(--signal);
+  }
+  .suggestion-arrow {
+    font-size: 0.75rem;
+    opacity: 0.5;
+  }
 
   /* ---------- Hero Section ---------- */
   .hero {
@@ -330,6 +371,7 @@
     width: 100%;
     max-width: 580px;
     margin: 0 auto;
+    position: relative;
     opacity: 0;
     transform: translateY(14px);
     animation: riseIn 0.5s var(--ease-out) 0.3s forwards;
@@ -382,6 +424,29 @@
     background: var(--live-dim);
     padding: 3px 8px;
     border-radius: var(--radius-full);
+  }
+
+  /* ---------- Fuzzy "Did You Mean" Banner ---------- */
+  .did-you-mean {
+    margin-bottom: 18px;
+    padding: 10px 14px;
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-border);
+    border-radius: var(--radius-sm);
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    color: var(--warn-ink);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .did-you-mean-link {
+    color: var(--signal);
+    font-weight: 600;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
   }
 
   /* ---------- Loader & Empty States ---------- */
@@ -621,7 +686,6 @@
 
   /* ---------- Comprehensive Mobile & Tablet Breakpoints ---------- */
   @media (max-width: 680px) {
-    /* Prevent iOS auto-zoom on input focus */
     .search-form input,
     .rail-form-slot .search-form input {
       font-size: 16px !important;
@@ -632,7 +696,6 @@
       padding-right: 16px;
     }
 
-    /* Compress the sticky top bar */
     .rail-inner {
       gap: 10px;
       min-height: 56px;
@@ -644,7 +707,6 @@
     }
     .rail-status span:last-child { display: none; }
 
-    /* Results layout stacking */
     .card {
       flex-direction: column;
     }
@@ -672,7 +734,6 @@
       font-size: 0.88rem;
     }
 
-    /* Stats alignment */
     .stats-bar {
       flex-direction: column;
       align-items: flex-start;
@@ -738,6 +799,7 @@
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><line x1="20" y1="20" x2="15.5" y2="15.5"/></svg>
         <input id="query-input" type="text" name="q" placeholder="search 1,000+ wikipedia articles…" aria-label="Search query" autofocus>
         <button type="submit" class="search-submit">search</button>
+        <ul class="suggestions-menu" id="suggestions-menu" role="listbox"></ul>
       </form>
     </div>
   </section>
@@ -753,6 +815,7 @@
       <span class="stats-time" id="stats-time"></span>
     </div>
 
+    <div id="did-you-mean" class="did-you-mean" hidden></div>
     <div id="results-list"></div>
 
     <nav class="pagination" id="pagination" aria-label="Search Pagination" hidden>
@@ -788,6 +851,7 @@
   const heroCopy = document.getElementById('hero-copy');
   const form = document.getElementById('search-form');
   const input = document.getElementById('query-input');
+  const suggestionsMenu = document.getElementById('suggestions-menu');
   const resultsSection = document.getElementById('results-section');
   const resultsList = document.getElementById('results-list');
   const statsBar = document.getElementById('stats-bar');
@@ -795,11 +859,15 @@
   const statsPage = document.getElementById('stats-page');
   const statsDemo = document.getElementById('stats-demo');
   const statsTime = document.getElementById('stats-time');
+  const didYouMean = document.getElementById('did-you-mean');
   const pagination = document.getElementById('pagination');
   const prevBtn = document.getElementById('prev-btn');
   const nextBtn = document.getElementById('next-btn');
   const pagePos = document.getElementById('page-pos');
   const topBtn = document.getElementById('top-btn');
+
+  let suggestTimeout = null;
+  let selectedSuggestionIndex = -1;
 
   /* ---------- Offline Mock Corpus (Fallback only) ---------- */
   const MOCK_DOCS = [
@@ -846,7 +914,8 @@
           page,
           total_pages,
           execution_time_ms: (0.18 + Math.random() * 0.4).toFixed(2),
-          results
+          results,
+          did_you_mean: total_hits === 0 ? ['algorithm', 'search'] : null
         });
       }, delay);
     });
@@ -865,6 +934,51 @@
       const data = await mockSearch(query, page, lim);
       return { data, demo: true };
     }
+  }
+
+  /* ---------- FST Autocomplete Fetcher ---------- */
+  async function fetchSuggestions(prefix) {
+    if (!prefix || prefix.length < 2) {
+      closeSuggestions();
+      return;
+    }
+    try {
+      const res = await fetch(`/api/suggest?q=${encodeURIComponent(prefix)}&limit=5`);
+      if (!res.ok) return;
+      const suggestions = await res.json();
+      renderSuggestions(suggestions);
+    } catch (_) {
+      closeSuggestions();
+    }
+  }
+
+  function renderSuggestions(items) {
+    if (!items || !items.length) {
+      closeSuggestions();
+      return;
+    }
+    suggestionsMenu.innerHTML = items.map((item, idx) => `
+      <li class="suggestion-item" data-index="${idx}" role="option">
+        <span>${escapeHtml(item)}</span>
+        <span class="suggestion-arrow" aria-hidden="true">↵</span>
+      </li>
+    `).join('');
+    suggestionsMenu.classList.add('open');
+    selectedSuggestionIndex = -1;
+
+    suggestionsMenu.querySelectorAll('.suggestion-item').forEach(el => {
+      el.addEventListener('click', () => {
+        input.value = el.querySelector('span').textContent;
+        closeSuggestions();
+        form.requestSubmit();
+      });
+    });
+  }
+
+  function closeSuggestions() {
+    suggestionsMenu.classList.remove('open');
+    suggestionsMenu.innerHTML = '';
+    selectedSuggestionIndex = -1;
   }
 
   /* ---------- Utility Helpers ---------- */
@@ -957,6 +1071,25 @@
     statsDemo.hidden = !demo;
     lastTotalPages = data.total_pages;
 
+    // Levenshtein DFA "Did you mean" integration
+    if (data.did_you_mean && data.did_you_mean.length > 0 && data.total_hits === 0) {
+      didYouMean.hidden = false;
+      const suggestionsHtml = data.did_you_mean
+        .map(term => `<span class="did-you-mean-link" data-term="${escapeHtml(term)}">${escapeHtml(term)}</span>`)
+        .join(', ');
+      didYouMean.innerHTML = `<span>Did you mean:</span> ${suggestionsHtml}?`;
+
+      didYouMean.querySelectorAll('.did-you-mean-link').forEach(link => {
+        link.addEventListener('click', () => {
+          input.value = link.dataset.term;
+          form.requestSubmit();
+        });
+      });
+    } else {
+      didYouMean.hidden = true;
+      didYouMean.innerHTML = '';
+    }
+
     if (!data.results.length) {
       resultsList.innerHTML = emptyHTML(currentQuery);
       pagination.hidden = true;
@@ -1036,14 +1169,60 @@
     form.style.transition = '';
     resultsSection.hidden = true;
     statsBar.hidden = true;
+    didYouMean.hidden = true;
+    didYouMean.innerHTML = '';
     pagination.hidden = true;
     resultsList.innerHTML = '';
+    closeSuggestions();
     input.focus();
   }
 
   /* ---------- Event Listeners ---------- */
+  input.addEventListener('input', (e) => {
+    clearTimeout(suggestTimeout);
+    const val = e.target.value.trim();
+    suggestTimeout = setTimeout(() => fetchSuggestions(val), 150);
+  });
+
+  input.addEventListener('keydown', (e) => {
+    const items = suggestionsMenu.querySelectorAll('.suggestion-item');
+    if (!suggestionsMenu.classList.contains('open') || !items.length) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      selectedSuggestionIndex = (selectedSuggestionIndex + 1) % items.length;
+      updateSuggestionSelection(items);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      selectedSuggestionIndex = (selectedSuggestionIndex - 1 + items.length) % items.length;
+      updateSuggestionSelection(items);
+    } else if (e.key === 'Enter' && selectedSuggestionIndex >= 0) {
+      e.preventDefault();
+      items[selectedSuggestionIndex].click();
+    } else if (e.key === 'Escape') {
+      closeSuggestions();
+    }
+  });
+
+  function updateSuggestionSelection(items) {
+    items.forEach((item, idx) => {
+      const isSel = idx === selectedSuggestionIndex;
+      item.classList.toggle('selected', isSel);
+      if (isSel) {
+        input.value = item.querySelector('span').textContent;
+      }
+    });
+  }
+
+  document.addEventListener('click', (e) => {
+    if (!form.contains(e.target)) {
+      closeSuggestions();
+    }
+  });
+
   form.addEventListener('submit', (e) => {
     e.preventDefault();
+    closeSuggestions();
     const q = input.value.trim();
     if (!q) return;
     currentQuery = q;
@@ -1059,6 +1238,7 @@
   document.querySelectorAll('.chip').forEach(chip => {
     chip.addEventListener('click', () => {
       input.value = chip.textContent;
+      closeSuggestions();
       form.requestSubmit();
     });
   });
@@ -1082,8 +1262,12 @@
       e.preventDefault();
       input.focus();
       input.select();
-    } else if (e.key === 'Escape' && hasSearched && document.activeElement === input) {
-      resetToHero();
+    } else if (e.key === 'Escape') {
+      if (suggestionsMenu.classList.contains('open')) {
+        closeSuggestions();
+      } else if (hasSearched && document.activeElement === input) {
+        resetToHero();
+      }
     }
   });
 </script>

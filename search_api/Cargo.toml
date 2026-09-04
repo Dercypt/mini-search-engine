@@ -13,3 +13,5 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 regex = "1.10"
 rust-stemmers = "1.2"
+fst = { version = "0.4", features = ["levenshtein"] }
+aho-corasick = "1.1"

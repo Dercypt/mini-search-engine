@@ -1,10 +1,11 @@
+use fst::SetBuilder;
 use regex::Regex;
 use roaring::RoaringBitmap;
 use rust_stemmers::{Algorithm, Stemmer};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufReader, Write};
+use std::io::{BufReader, BufWriter, Write};
 use std::time::Instant;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -248,6 +249,7 @@ impl TokenizerPipeline {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let raw_docs_path = "../crawler/documents.json";
     let output_index_path = "index.json";
+    let output_fst_path = "dictionary.fst";
 
     println!("Loading documents from {}...", raw_docs_path);
     let start_time = Instant::now();
@@ -281,6 +283,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut out_file = File::create(output_index_path)?;
     out_file.write_all(&json_bytes)?;
     println!("Saved {} in {:?}", output_index_path, save_start.elapsed());
+
+    // Build and Save Lexicon FST (Requires lexicographical ordering)
+    let fst_start = Instant::now();
+    let mut sorted_terms: Vec<String> = index_store.inverted_index.keys().cloned().collect();
+    sorted_terms.sort();
+    sorted_terms.dedup();
+
+    let fst_file = File::create(output_fst_path)?;
+    let fst_writer = BufWriter::new(fst_file);
+    let mut builder = SetBuilder::new(fst_writer)?;
+
+    for term in &sorted_terms {
+        builder.insert(term.as_bytes())?;
+    }
+    builder.finish()?;
+    println!(
+        "Compiled and saved {} terms to {} in {:?}",
+        sorted_terms.len(),
+        output_fst_path,
+        fst_start.elapsed()
+    );
 
     // Test BM25 Query with Roaring Bitmaps
     let test_queries = ["search engine", "page rank algorithm", "open source"];
