@@ -445,8 +445,9 @@ fn generate_dynamic_snippet(content: &str, query_terms: &[String], target_len: u
         }
     }
 
-    // Expand backwards slightly to avoid cutting off mid-word
-    let start_offset = best_start.saturating_sub(40);
+    // Expand backwards slightly to avoid cutting off mid-word (safeguarding UTF-8 boundaries)
+    let raw_start = best_start.saturating_sub(40);
+    let start_offset = content.floor_char_boundary(raw_start);
     let safe_start = if start_offset > 0 {
         content[start_offset..best_start]
             .find(' ')
@@ -456,7 +457,8 @@ fn generate_dynamic_snippet(content: &str, query_terms: &[String], target_len: u
         0
     };
 
-    let rough_end = (safe_start + target_len).min(content.len());
+    let raw_end = (safe_start + target_len).min(content.len());
+    let rough_end = content.ceil_char_boundary(raw_end);
     let safe_end = if rough_end < content.len() {
         content[rough_end..]
             .find(' ')
@@ -465,6 +467,7 @@ fn generate_dynamic_snippet(content: &str, query_terms: &[String], target_len: u
     } else {
         content.len()
     };
+    let safe_end = safe_end.max(safe_start);
 
     let prefix = if safe_start > 0 { "..." } else { "" };
     let suffix = if safe_end < content.len() { "..." } else { "" };
@@ -655,7 +658,7 @@ async fn search_handler(
     ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     let total_hits = ranked.len();
-    let total_pages = (total_hits + limit - 1) / limit;
+    let total_pages = total_hits.div_ceil(limit);
 
     // Fuzzy matching fallback if zero hits were scored
     let did_you_mean = if total_hits == 0 {
