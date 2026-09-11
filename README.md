@@ -8,7 +8,7 @@ A lightweight, from-scratch search engine built in Rust. Features an asynchronou
 ## Features
 * **Async Crawler:** Concurrent web scraper powered by `tokio` and `reqwest`.
 * **Inverted Index:** In-memory postings list with Porter stemming and token normalization.
-* **BM25 Ranking:** Relevance scoring ($k_1 = 1.2, b = 0.75$) matching corpus rarity.
+* **BM25 Ranking:** Relevance scoring ($k_1 = 1.5, b = 0.75$) matching corpus rarity.
 * **Embedded UI:** Single-binary web interface and JSON API served via `axum`.
 * **Fast Retrieval:** Sub-millisecond query latency directly against memory.
 
