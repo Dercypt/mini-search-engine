@@ -58,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     headers.insert(
         USER_AGENT,
         HeaderValue::from_static(
-            "MiniSearchEngineBot/1.0 (+https://github.com/yourusername/mini-search-engine)",
+            "MiniSearchEngineBot/1.0 (+https://github.com/Dercypt/mini-search-engine)",
         ),
     );
 
