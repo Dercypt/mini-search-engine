@@ -1,6 +1,5 @@
 use fst::SetBuilder;
 use regex::Regex;
-use roaring::RoaringBitmap;
 use rust_stemmers::{Algorithm, Stemmer};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -38,8 +37,6 @@ pub struct IndexStore {
     pub avg_doc_length: f64,
     pub doc_meta: HashMap<u32, DocMetadata>,
     pub inverted_index: HashMap<String, Vec<Posting>>,
-    #[serde(skip)]
-    pub term_bitmaps: HashMap<String, RoaringBitmap>,
 }
 
 pub struct TokenizerPipeline {
@@ -305,7 +302,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fst_start.elapsed()
     );
 
-    // Test BM25 Query with Roaring Bitmaps
+    // Test BM25 Query Evaluation
     let test_queries = ["search engine", "page rank algorithm", "open source"];
     for query in test_queries {
         println!("\n--- Test Query: \"{}\" ---", query);
@@ -320,7 +317,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn build_index(docs: &[RawDocument], pipeline: &TokenizerPipeline) -> IndexStore {
     let mut inverted_index: HashMap<String, Vec<Posting>> = HashMap::new();
-    let mut term_bitmaps: HashMap<String, RoaringBitmap> = HashMap::new();
     let mut doc_meta: HashMap<u32, DocMetadata> = HashMap::new();
     let mut total_terms: usize = 0;
 
@@ -328,7 +324,7 @@ fn build_index(docs: &[RawDocument], pipeline: &TokenizerPipeline) -> IndexStore
         let internal_id = idx as u32;
 
         // Title terms receive double weight
-        let mut title_terms = pipeline.tokenize(&doc.title_or_default(&doc.title));
+        let mut title_terms = pipeline.tokenize(&doc.title);
         let content_terms = pipeline.tokenize(&doc.content);
 
         let mut all_terms = Vec::with_capacity(title_terms.len() * 2 + content_terms.len());
@@ -364,8 +360,6 @@ fn build_index(docs: &[RawDocument], pipeline: &TokenizerPipeline) -> IndexStore
                     doc_id: internal_id,
                     term_frequency: tf,
                 });
-
-            term_bitmaps.entry(term).or_default().insert(internal_id);
         }
     }
 
@@ -380,21 +374,6 @@ fn build_index(docs: &[RawDocument], pipeline: &TokenizerPipeline) -> IndexStore
         avg_doc_length,
         doc_meta,
         inverted_index,
-        term_bitmaps,
-    }
-}
-
-trait TitleHelper {
-    fn title_or_default<'a>(&'a self, fallback: &'a str) -> &'a str;
-}
-
-impl TitleHelper for RawDocument {
-    fn title_or_default<'a>(&'a self, fallback: &'a str) -> &'a str {
-        if self.title.is_empty() {
-            fallback
-        } else {
-            &self.title
-        }
     }
 }
 
