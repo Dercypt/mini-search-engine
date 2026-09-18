@@ -6,7 +6,7 @@ cd crawler
 cargo run --release
 cd ..
 
-echo -e "\n=== [2/3] Building Inverted Index & BM25 Cache ==="
+echo -e "\n=== [2/3] Building Binary Inverted Index (mmap & VByte Postings) ==="
 cd indexer
 cargo run --release
 cd ..
