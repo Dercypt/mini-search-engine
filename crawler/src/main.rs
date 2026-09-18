@@ -5,7 +5,10 @@ use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use std::fs::File;
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio::time::sleep;
@@ -34,17 +37,114 @@ fn normalize_url(raw_url: &str) -> Option<String> {
     Some(parsed.to_string())
 }
 
+// ============================================================================
+// Streaming Binary Document Storage Writer (documents.bin)
+// ============================================================================
+
+pub struct DocStoreWriter {
+    file: BufWriter<File>,
+    doc_count: u32,
+    offsets: Vec<(u64, u32)>,
+    current_offset: u64,
+}
+
+impl DocStoreWriter {
+    pub fn create<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<Self> {
+        let file = File::create(path)?;
+        let mut writer = BufWriter::new(file);
+        let placeholder = [0u8; 64];
+        writer.write_all(&placeholder)?;
+        Ok(Self {
+            file: writer,
+            doc_count: 0,
+            offsets: Vec::new(),
+            current_offset: 64,
+        })
+    }
+
+    pub fn append(
+        &mut self,
+        id: &str,
+        url: &str,
+        title: &str,
+        content: &str,
+        links: &[String],
+    ) -> std::io::Result<u32> {
+        let start_offset = self.current_offset;
+        let mut written = 0u32;
+
+        let id_bytes = id.as_bytes();
+        self.file.write_all(&(id_bytes.len() as u16).to_le_bytes())?;
+        self.file.write_all(id_bytes)?;
+        written += 2 + id_bytes.len() as u32;
+
+        let url_bytes = url.as_bytes();
+        self.file
+            .write_all(&(url_bytes.len() as u16).to_le_bytes())?;
+        self.file.write_all(url_bytes)?;
+        written += 2 + url_bytes.len() as u32;
+
+        let title_bytes = title.as_bytes();
+        self.file
+            .write_all(&(title_bytes.len() as u16).to_le_bytes())?;
+        self.file.write_all(title_bytes)?;
+        written += 2 + title_bytes.len() as u32;
+
+        let content_bytes = content.as_bytes();
+        self.file
+            .write_all(&(content_bytes.len() as u32).to_le_bytes())?;
+        self.file.write_all(content_bytes)?;
+        written += 4 + content_bytes.len() as u32;
+
+        self.file.write_all(&(links.len() as u32).to_le_bytes())?;
+        written += 4;
+        for link in links {
+            let link_bytes = link.as_bytes();
+            self.file
+                .write_all(&(link_bytes.len() as u16).to_le_bytes())?;
+            self.file.write_all(link_bytes)?;
+            written += 2 + link_bytes.len() as u32;
+        }
+
+        self.offsets.push((start_offset, written));
+        self.current_offset += written as u64;
+        let doc_id = self.doc_count;
+        self.doc_count += 1;
+        Ok(doc_id)
+    }
+
+    pub fn finish(mut self) -> std::io::Result<u32> {
+        let index_offset = self.current_offset;
+        for (offset, len) in &self.offsets {
+            self.file.write_all(&offset.to_le_bytes())?;
+            self.file.write_all(&len.to_le_bytes())?;
+        }
+        self.file.flush()?;
+
+        let mut file = self.file.into_inner().map_err(|e| e.into_error())?;
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(b"MSEDOC01")?;
+        file.write_all(&self.doc_count.to_le_bytes())?;
+        file.write_all(&index_offset.to_le_bytes())?;
+        let padding = [0u8; 44];
+        file.write_all(&padding)?;
+        file.flush()?;
+        Ok(self.doc_count)
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let max_pages = 1000;
     let seed_url = "https://en.wikipedia.org/wiki/Search_engine".to_string();
 
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let (doc_tx, mut doc_rx) = mpsc::channel::<Document>(100);
 
     let bloom_filter = Arc::new(Mutex::new(
-        BloomFilter::with_false_pos(0.001).expected_items(10_000),
+        BloomFilter::with_false_pos(0.001).expected_items(500_000),
     ));
-    let saved_docs = Arc::new(Mutex::new(Vec::<Document>::new()));
+    let doc_count = Arc::new(AtomicUsize::new(0));
     let semaphore = Arc::new(Semaphore::new(5));
 
     let disallowed_patterns = vec![
@@ -78,9 +178,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_pages
     );
 
+    // Dedicated background writer task: streams docs to disk with low memory footprint
+    let writer_handle = tokio::spawn(async move {
+        let mut bin_writer = DocStoreWriter::create("documents.bin").expect("failed to create documents.bin");
+        let mut json_writer = BufWriter::new(File::create("documents.json").expect("failed to create documents.json"));
+        json_writer.write_all(b"[\n").expect("failed to write json header");
+        let mut first = true;
+
+        while let Some(doc) = doc_rx.recv().await {
+            bin_writer
+                .append(&doc.id, &doc.url, &doc.title, &doc.content, &doc.links)
+                .expect("failed to append to documents.bin");
+
+            if !first {
+                json_writer.write_all(b",\n").expect("failed to write json separator");
+            }
+            first = false;
+            let json = serde_json::to_string(&doc).expect("failed to serialize doc");
+            json_writer.write_all(json.as_bytes()).expect("failed to write json doc");
+        }
+
+        json_writer.write_all(b"\n]\n").expect("failed to write json footer");
+        json_writer.flush().expect("failed to flush json");
+        let count = bin_writer.finish().expect("failed to finish documents.bin");
+        count
+    });
+
     while let Some(current_url) = rx.recv().await {
-        let docs_len = saved_docs.lock().await.len();
-        if docs_len >= max_pages {
+        let current_count = doc_count.load(Ordering::Relaxed);
+        if current_count >= max_pages {
             break;
         }
 
@@ -88,7 +214,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let client = client.clone();
         let tx = tx.clone();
         let bloom_filter = bloom_filter.clone();
-        let saved_docs = saved_docs.clone();
+        let doc_tx = doc_tx.clone();
+        let doc_count = doc_count.clone();
         let disallowed = disallowed.clone();
 
         tokio::spawn(async move {
@@ -177,21 +304,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            let mut docs = saved_docs.lock().await;
-            if docs.len() < max_pages {
-                docs.push(doc);
-                println!("[{}/{}] Scraped: {}", docs.len(), max_pages, current_url);
+            let prev = doc_count.fetch_add(1, Ordering::SeqCst);
+            if prev < max_pages {
+                println!("[{}/{}] Scraped: {}", prev + 1, max_pages, current_url);
+                let _ = doc_tx.send(doc).await;
             }
         });
     }
 
-    let final_docs = saved_docs.lock().await.clone();
-    let json_bytes = serde_json::to_vec_pretty(&final_docs)?;
-    std::fs::write("documents.json", json_bytes)?;
+    // Drop original sender so writer knows when all items are received
+    drop(doc_tx);
+    let total_saved = writer_handle.await?;
 
     println!(
-        "\nDone! Saved {} clean documents to documents.json",
-        final_docs.len()
+        "\nDone! Streamed and saved {} documents to documents.bin and documents.json",
+        total_saved
     );
     Ok(())
 }

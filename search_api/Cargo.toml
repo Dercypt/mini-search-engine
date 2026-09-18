@@ -15,3 +15,4 @@ regex = "1.10"
 rust-stemmers = "1.2"
 fst = { version = "0.4", features = ["levenshtein"] }
 aho-corasick = "1.1"
+memmap2 = "0.9"
