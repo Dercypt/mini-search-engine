@@ -7,86 +7,431 @@ use axum::{
     routing::get,
 };
 use fst::automaton::{Levenshtein, Str};
-use fst::{Automaton, IntoStreamer, Set, SetBuilder, Streamer};
+use fst::{Automaton, IntoStreamer, Map, MapBuilder, Streamer};
 use regex::Regex;
 use rust_stemmers::{Algorithm, Stemmer};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::BufReader;
+use std::io::BufWriter;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-// --- Data Models ---
+// ============================================================================
+// VByte Compression & Postings Iterator
+// ============================================================================
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct RawDocument {
-    pub id: String,
-    pub url: String,
-    pub title: String,
-    pub content: String,
-    pub links: Vec<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Clone)]
 pub struct Posting {
     pub doc_id: u32,
     pub term_frequency: u32,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct DocMetadata {
-    pub internal_id: u32,
-    pub hex_id: String,
-    pub url: String,
-    pub title: String,
-    pub length: u32,
+#[inline]
+pub fn decode_vbyte(bytes: &[u8], offset: &mut usize) -> Option<u32> {
+    let mut result = 0u32;
+    let mut shift = 0;
+    while *offset < bytes.len() {
+        let byte = bytes[*offset];
+        *offset += 1;
+        result |= ((byte & 0x7F) as u32) << shift;
+        if (byte & 0x80) == 0 {
+            return Some(result);
+        }
+        shift += 7;
+        if shift > 35 {
+            return None;
+        }
+    }
+    None
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct IndexStore {
+pub struct PostingsIterator<'a> {
+    slice: &'a [u8],
+    offset: usize,
+    last_doc_id: u32,
+    remaining: usize,
+    index: usize,
+}
+
+impl<'a> PostingsIterator<'a> {
+    pub fn new(slice: &'a [u8], doc_freq: usize) -> Self {
+        Self {
+            slice,
+            offset: 0,
+            last_doc_id: 0,
+            remaining: doc_freq,
+            index: 0,
+        }
+    }
+}
+
+impl<'a> Iterator for PostingsIterator<'a> {
+    type Item = Posting;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let delta = decode_vbyte(self.slice, &mut self.offset)?;
+        let doc_id = if self.index == 0 {
+            delta
+        } else {
+            self.last_doc_id + delta
+        };
+        self.last_doc_id = doc_id;
+        self.index += 1;
+        self.remaining -= 1;
+        let term_frequency = decode_vbyte(self.slice, &mut self.offset).unwrap_or(1);
+        Some(Posting {
+            doc_id,
+            term_frequency,
+        })
+    }
+}
+
+// ============================================================================
+// Memory-Mapped Document Store (documents.bin)
+// ============================================================================
+
+pub struct DocRecordRef<'a> {
+    pub id: &'a str,
+    pub url: &'a str,
+    pub title: &'a str,
+    pub content: &'a str,
+}
+
+pub struct MmapDocStore {
+    mmap: memmap2::Mmap,
+    doc_count: u32,
+    index_offset: usize,
+}
+
+impl MmapDocStore {
+    pub fn open<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
+        let file = File::open(path)?;
+        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        if mmap.len() < 64 || &mmap[0..8] != b"MSEDOC01" {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid document store magic header",
+            ));
+        }
+        let doc_count = u32::from_le_bytes(mmap[8..12].try_into().unwrap());
+        let index_offset = u64::from_le_bytes(mmap[12..20].try_into().unwrap()) as usize;
+        Ok(Self {
+            mmap,
+            doc_count,
+            index_offset,
+        })
+    }
+
+    #[inline]
+    pub fn doc_count(&self) -> u32 {
+        self.doc_count
+    }
+
+    pub fn get_doc_slice(&self, doc_id: u32) -> Option<&[u8]> {
+        if doc_id >= self.doc_count {
+            return None;
+        }
+        let entry_offset = self.index_offset + (doc_id as usize) * 12;
+        if entry_offset + 12 > self.mmap.len() {
+            return None;
+        }
+        let offset =
+            u64::from_le_bytes(self.mmap[entry_offset..entry_offset + 8].try_into().unwrap())
+                as usize;
+        let len = u32::from_le_bytes(
+            self.mmap[entry_offset + 8..entry_offset + 12]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        if offset + len > self.mmap.len() {
+            return None;
+        }
+        Some(&self.mmap[offset..offset + len])
+    }
+
+    pub fn get_doc(&self, doc_id: u32) -> Option<DocRecordRef<'_>> {
+        let slice = self.get_doc_slice(doc_id)?;
+        let mut pos = 0;
+        if slice.len() < 2 {
+            return None;
+        }
+        let id_len = u16::from_le_bytes([slice[pos], slice[pos + 1]]) as usize;
+        pos += 2;
+        if pos + id_len > slice.len() {
+            return None;
+        }
+        let id = std::str::from_utf8(&slice[pos..pos + id_len]).ok()?;
+        pos += id_len;
+
+        if pos + 2 > slice.len() {
+            return None;
+        }
+        let url_len = u16::from_le_bytes([slice[pos], slice[pos + 1]]) as usize;
+        pos += 2;
+        if pos + url_len > slice.len() {
+            return None;
+        }
+        let url = std::str::from_utf8(&slice[pos..pos + url_len]).ok()?;
+        pos += url_len;
+
+        if pos + 2 > slice.len() {
+            return None;
+        }
+        let title_len = u16::from_le_bytes([slice[pos], slice[pos + 1]]) as usize;
+        pos += 2;
+        if pos + title_len > slice.len() {
+            return None;
+        }
+        let title = std::str::from_utf8(&slice[pos..pos + title_len]).ok()?;
+        pos += title_len;
+
+        if pos + 4 > slice.len() {
+            return None;
+        }
+        let content_len = u32::from_le_bytes([
+            slice[pos],
+            slice[pos + 1],
+            slice[pos + 2],
+            slice[pos + 3],
+        ]) as usize;
+        pos += 4;
+        if pos + content_len > slice.len() {
+            return None;
+        }
+        let content = std::str::from_utf8(&slice[pos..pos + content_len]).ok()?;
+
+        Some(DocRecordRef {
+            id,
+            url,
+            title,
+            content,
+        })
+    }
+
+    pub fn get_content(&self, doc_id: u32) -> Option<&str> {
+        self.get_doc(doc_id).map(|d| d.content)
+    }
+}
+
+// ============================================================================
+// Memory-Mapped Binary Index (index.bin)
+// ============================================================================
+
+pub struct TermEntry {
+    pub postings_offset: u64,
+    pub postings_len: u32,
+    pub doc_freq: u32,
+}
+
+pub struct DocMetaRef<'a> {
+    pub hex_id: &'a str,
+    pub url: &'a str,
+    pub title: &'a str,
+}
+
+pub struct MmapIndex {
+    mmap: memmap2::Mmap,
     pub total_docs: u32,
     pub avg_doc_length: f64,
-    pub doc_meta: HashMap<u32, DocMetadata>,
-    pub inverted_index: HashMap<String, Vec<Posting>>,
+    pub num_terms: u32,
+    doc_lengths_offset: usize,
+    doc_meta_index_offset: usize,
+    doc_meta_data_offset: usize,
+    terms_table_offset: usize,
+    terms_strings_offset: usize,
+    postings_offset: usize,
 }
 
-// --- FST Term Dictionary (Autocomplete & Fuzzy) ---
+impl MmapIndex {
+    pub fn open<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
+        let file = File::open(path)?;
+        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        if mmap.len() < 128 || &mmap[0..8] != b"MSEIDX01" {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid index magic header",
+            ));
+        }
+        let total_docs = u32::from_le_bytes(mmap[8..12].try_into().unwrap());
+        let avg_doc_length = f64::from_le_bytes(mmap[12..20].try_into().unwrap());
+        let doc_lengths_offset = u64::from_le_bytes(mmap[20..28].try_into().unwrap()) as usize;
+        let doc_meta_index_offset = u64::from_le_bytes(mmap[28..36].try_into().unwrap()) as usize;
+        let doc_meta_data_offset = u64::from_le_bytes(mmap[36..44].try_into().unwrap()) as usize;
+        let terms_table_offset = u64::from_le_bytes(mmap[44..52].try_into().unwrap()) as usize;
+        let num_terms = u32::from_le_bytes(mmap[52..56].try_into().unwrap());
+        let terms_strings_offset = u64::from_le_bytes(mmap[56..64].try_into().unwrap()) as usize;
+        let postings_offset = u64::from_le_bytes(mmap[64..72].try_into().unwrap()) as usize;
+
+        Ok(Self {
+            mmap,
+            total_docs,
+            avg_doc_length,
+            num_terms,
+            doc_lengths_offset,
+            doc_meta_index_offset,
+            doc_meta_data_offset,
+            terms_table_offset,
+            terms_strings_offset,
+            postings_offset,
+        })
+    }
+
+    #[inline]
+    pub fn get_doc_length(&self, doc_id: u32) -> u32 {
+        if doc_id >= self.total_docs {
+            return 0;
+        }
+        let off = self.doc_lengths_offset + (doc_id as usize) * 4;
+        u32::from_le_bytes(self.mmap[off..off + 4].try_into().unwrap())
+    }
+
+    pub fn get_doc_meta(&self, doc_id: u32) -> Option<DocMetaRef<'_>> {
+        if doc_id >= self.total_docs {
+            return None;
+        }
+        let idx_off = self.doc_meta_index_offset + (doc_id as usize) * 8;
+        let meta_rel_start =
+            u64::from_le_bytes(self.mmap[idx_off..idx_off + 8].try_into().unwrap()) as usize;
+        let meta_rel_end =
+            u64::from_le_bytes(self.mmap[idx_off + 8..idx_off + 16].try_into().unwrap()) as usize;
+
+        let start = self.doc_meta_data_offset + meta_rel_start;
+        let end = self.doc_meta_data_offset + meta_rel_end;
+        if end > self.mmap.len() || start >= end {
+            return None;
+        }
+        let slice = &self.mmap[start..end];
+        let mut pos = 0;
+        if slice.len() < 2 {
+            return None;
+        }
+        let hex_id_len = u16::from_le_bytes([slice[pos], slice[pos + 1]]) as usize;
+        pos += 2;
+        let hex_id = std::str::from_utf8(&slice[pos..pos + hex_id_len]).ok()?;
+        pos += hex_id_len;
+
+        if pos + 2 > slice.len() {
+            return None;
+        }
+        let url_len = u16::from_le_bytes([slice[pos], slice[pos + 1]]) as usize;
+        pos += 2;
+        let url = std::str::from_utf8(&slice[pos..pos + url_len]).ok()?;
+        pos += url_len;
+
+        if pos + 2 > slice.len() {
+            return None;
+        }
+        let title_len = u16::from_le_bytes([slice[pos], slice[pos + 1]]) as usize;
+        pos += 2;
+        let title = std::str::from_utf8(&slice[pos..pos + title_len]).ok()?;
+
+        Some(DocMetaRef {
+            hex_id,
+            url,
+            title,
+        })
+    }
+
+    #[inline]
+    pub fn get_term_entry(&self, term_idx: usize) -> Option<TermEntry> {
+        if term_idx >= self.num_terms as usize {
+            return None;
+        }
+        let off = self.terms_table_offset + term_idx * 16;
+        if off + 16 > self.mmap.len() {
+            return None;
+        }
+        let postings_offset = u64::from_le_bytes(self.mmap[off..off + 8].try_into().unwrap());
+        let postings_len = u32::from_le_bytes(self.mmap[off + 8..off + 12].try_into().unwrap());
+        let doc_freq = u32::from_le_bytes(self.mmap[off + 12..off + 16].try_into().unwrap());
+        Some(TermEntry {
+            postings_offset,
+            postings_len,
+            doc_freq,
+        })
+    }
+
+    #[inline]
+    pub fn get_postings_slice(&self, entry: &TermEntry) -> &[u8] {
+        let start = self.postings_offset + entry.postings_offset as usize;
+        let end = start + entry.postings_len as usize;
+        &self.mmap[start..end]
+    }
+
+    pub fn get_term_str(&self, term_idx: usize) -> Option<&str> {
+        if term_idx >= self.num_terms as usize {
+            return None;
+        }
+        let off = self.terms_strings_offset + term_idx * 4;
+        let s_start = u32::from_le_bytes(self.mmap[off..off + 4].try_into().unwrap()) as usize;
+        let s_end = u32::from_le_bytes(self.mmap[off + 4..off + 8].try_into().unwrap()) as usize;
+        let data_base = self.terms_strings_offset + (self.num_terms as usize + 1) * 4;
+        let start = data_base + s_start;
+        let end = data_base + s_end;
+        if end > self.mmap.len() {
+            return None;
+        }
+        std::str::from_utf8(&self.mmap[start..end]).ok()
+    }
+}
+
+// ============================================================================
+// FST Term Dictionary (using fst::Map)
+// ============================================================================
 
 pub struct TermDictionary {
-    fst_set: Set<Vec<u8>>,
+    fst_map: Map<memmap2::Mmap>,
 }
 
 impl TermDictionary {
-    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, fst::Error> {
-        let fst_set = Set::new(bytes)?;
-        Ok(Self { fst_set })
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
+        let file = File::open(path)?;
+        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        let fst_map = Map::new(mmap)?;
+        Ok(Self { fst_map })
     }
 
-    pub fn from_terms(terms: &[String]) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut sorted = terms.to_vec();
-        sorted.sort();
-        sorted.dedup();
-
-        let mut builder = SetBuilder::memory();
-        for term in sorted {
-            builder.insert(term.as_bytes())?;
+    pub fn build_from_index<P: AsRef<Path>>(
+        fst_path: P,
+        index: &MmapIndex,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let file = File::create(fst_path.as_ref())?;
+        let writer = BufWriter::new(file);
+        let mut builder = MapBuilder::new(writer)?;
+        for idx in 0..index.num_terms as usize {
+            if let Some(term) = index.get_term_str(idx) {
+                builder.insert(term.as_bytes(), idx as u64)?;
+            }
         }
-        let bytes = builder.into_inner()?;
-        let fst_set = Set::new(bytes)?;
-        Ok(Self { fst_set })
+        builder.finish()?;
+        Self::open(fst_path)
+    }
+
+    #[inline]
+    pub fn get(&self, term: &str) -> Option<u64> {
+        self.fst_map.get(term.as_bytes())
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.fst_map.len()
     }
 
     pub fn suggest_prefix(&self, prefix: &str, limit: usize) -> Vec<String> {
         let prefix_lower = prefix.to_lowercase();
         let prefix_matcher = Str::new(&prefix_lower).starts_with();
-        let mut stream = self.fst_set.search(prefix_matcher).into_stream();
+        let mut stream = self.fst_map.search(prefix_matcher).into_stream();
 
         let mut results = Vec::with_capacity(limit);
-        while let Some(term_bytes) = stream.next() {
+        while let Some((term_bytes, _val)) = stream.next() {
             if let Ok(term) = std::str::from_utf8(term_bytes) {
                 results.push(term.to_string());
                 if results.len() >= limit {
@@ -104,10 +449,10 @@ impl TermDictionary {
             Err(_) => return Vec::new(),
         };
 
-        let mut stream = self.fst_set.search(&dfa).into_stream();
+        let mut stream = self.fst_map.search(&dfa).into_stream();
         let mut matched = Vec::with_capacity(limit);
 
-        while let Some(bytes) = stream.next() {
+        while let Some((bytes, _val)) = stream.next() {
             if let Ok(s) = std::str::from_utf8(bytes) {
                 if s != term_lower {
                     matched.push(s.to_string());
@@ -121,7 +466,9 @@ impl TermDictionary {
     }
 }
 
-// --- Tokenizer Pipeline ---
+// ============================================================================
+// Tokenizer Pipeline
+// ============================================================================
 
 #[derive(Clone)]
 pub struct TokenizerPipeline {
@@ -133,180 +480,25 @@ pub struct TokenizerPipeline {
 impl TokenizerPipeline {
     pub fn new() -> Self {
         let stop_words: HashSet<&'static str> = [
-            "a",
-            "about",
-            "above",
-            "after",
-            "again",
-            "against",
-            "all",
-            "am",
-            "an",
-            "and",
-            "any",
-            "are",
-            "aren't",
-            "as",
-            "at",
-            "be",
-            "because",
-            "been",
-            "before",
-            "being",
-            "below",
-            "between",
-            "both",
-            "but",
-            "by",
-            "can't",
-            "cannot",
-            "could",
-            "couldn't",
-            "did",
-            "didn't",
-            "do",
-            "does",
-            "doesn't",
-            "doing",
-            "don't",
-            "down",
-            "during",
-            "each",
-            "few",
-            "for",
-            "from",
-            "further",
-            "had",
-            "hadn't",
-            "has",
-            "hasn't",
-            "have",
-            "haven't",
-            "having",
-            "he",
-            "he'd",
-            "he'll",
-            "he's",
-            "her",
-            "here",
-            "here's",
-            "hers",
-            "herself",
-            "him",
-            "himself",
-            "his",
-            "how",
-            "how's",
-            "i",
-            "i'd",
-            "i'll",
-            "i'm",
-            "i've",
-            "if",
-            "in",
-            "into",
-            "is",
-            "isn't",
-            "it",
-            "it's",
-            "its",
-            "itself",
-            "let's",
-            "me",
-            "more",
-            "most",
-            "mustn't",
-            "my",
-            "myself",
-            "no",
-            "nor",
-            "not",
-            "of",
-            "off",
-            "on",
-            "once",
-            "only",
-            "or",
-            "other",
-            "ought",
-            "our",
-            "ours",
-            "ourselves",
-            "out",
-            "over",
-            "own",
-            "same",
-            "shan't",
-            "she",
-            "she'd",
-            "she'll",
-            "she's",
-            "should",
-            "shouldn't",
-            "so",
-            "some",
-            "such",
-            "than",
-            "that",
-            "that's",
-            "the",
-            "their",
-            "theirs",
-            "them",
-            "themselves",
-            "then",
-            "there",
-            "there's",
-            "these",
-            "they",
-            "they'd",
-            "they'll",
-            "they're",
-            "they've",
-            "this",
-            "those",
-            "through",
-            "to",
-            "too",
-            "under",
-            "until",
-            "up",
-            "very",
-            "was",
-            "wasn't",
-            "we",
-            "we'd",
-            "we'll",
-            "we're",
-            "we've",
-            "were",
-            "weren't",
-            "what",
-            "what's",
-            "when",
-            "when's",
-            "where",
-            "where's",
-            "which",
-            "while",
-            "who",
-            "who's",
-            "whom",
-            "why",
-            "why's",
-            "with",
-            "won't",
-            "would",
-            "wouldn't",
-            "you",
-            "you'd",
-            "you'll",
-            "you're",
-            "you've",
-            "your",
-            "yours",
-            "yourself",
-            "yourselves",
+            "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any",
+            "are", "aren't", "as", "at", "be", "because", "been", "before", "being", "below",
+            "between", "both", "but", "by", "can't", "cannot", "could", "couldn't", "did",
+            "didn't", "do", "does", "doesn't", "doing", "don't", "down", "during", "each",
+            "few", "for", "from", "further", "had", "hadn't", "has", "hasn't", "have",
+            "haven't", "having", "he", "he'd", "he'll", "he's", "her", "here", "here's", "hers",
+            "herself", "him", "himself", "his", "how", "how's", "i", "i'd", "i'll", "i'm",
+            "i've", "if", "in", "into", "is", "isn't", "it", "it's", "its", "itself", "let's",
+            "me", "more", "most", "mustn't", "my", "myself", "no", "nor", "not", "of", "off",
+            "on", "once", "only", "or", "other", "ought", "our", "ours", "ourselves", "out",
+            "over", "own", "same", "shan't", "she", "she'd", "she'll", "she's", "should",
+            "shouldn't", "so", "some", "such", "than", "that", "that's", "the", "their",
+            "theirs", "them", "themselves", "then", "there", "there's", "these", "they",
+            "they'd", "they'll", "they're", "they've", "this", "those", "through", "to", "too",
+            "under", "until", "up", "very", "was", "wasn't", "we", "we'd", "we'll", "we're",
+            "we've", "were", "weren't", "what", "what's", "when", "when's", "where", "where's",
+            "which", "while", "who", "who's", "whom", "why", "why's", "with", "won't", "would",
+            "wouldn't", "you", "you'd", "you'll", "you're", "you've", "your", "yours",
+            "yourself", "yourselves",
         ]
         .into_iter()
         .collect();
@@ -328,61 +520,9 @@ impl TokenizerPipeline {
     }
 }
 
-// --- App State ---
-
-pub struct AppState {
-    pub index: IndexStore,
-    pub raw_docs_by_id: HashMap<String, RawDocument>,
-    pub pipeline: TokenizerPipeline,
-    pub dictionary: Arc<TermDictionary>,
-}
-
-// --- Request / Response DTOs ---
-
-#[derive(Deserialize)]
-pub struct SearchParams {
-    pub q: Option<String>,
-    pub page: Option<usize>,
-    pub limit: Option<usize>,
-}
-
-#[derive(Deserialize)]
-pub struct SuggestParams {
-    pub q: Option<String>,
-    pub limit: Option<usize>,
-}
-
-#[derive(Serialize)]
-pub struct SearchHit {
-    pub rank: usize,
-    pub doc_id: String,
-    pub score: f64,
-    pub title: String,
-    pub url: String,
-    pub snippet: String,
-}
-
-#[derive(Serialize)]
-pub struct SearchResponse {
-    pub query: String,
-    pub total_hits: usize,
-    pub page: usize,
-    pub limit: usize,
-    pub total_pages: usize,
-    pub execution_time_ms: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub did_you_mean: Option<Vec<String>>,
-    pub results: Vec<SearchHit>,
-}
-
-#[derive(Serialize)]
-pub struct HealthResponse {
-    pub status: String,
-    pub total_documents: u32,
-    pub vocabulary_size: usize,
-}
-
-// --- Dynamic Snippet Extractor (Aho-Corasick) ---
+// ============================================================================
+// Dynamic Snippet Extractor (Aho-Corasick on zero-copy memory-mapped slice)
+// ============================================================================
 
 fn generate_dynamic_snippet(content: &str, query_terms: &[String], target_len: usize) -> String {
     if content.is_empty() {
@@ -480,7 +620,75 @@ fn generate_dynamic_snippet(content: &str, query_terms: &[String], target_len: u
     )
 }
 
-// --- Main Server ---
+// ============================================================================
+// Application State & DTOs
+// ============================================================================
+
+pub struct AppState {
+    pub index: Arc<MmapIndex>,
+    pub doc_store: Arc<MmapDocStore>,
+    pub pipeline: TokenizerPipeline,
+    pub dictionary: Arc<TermDictionary>,
+}
+
+#[derive(Deserialize)]
+pub struct SearchParams {
+    pub q: Option<String>,
+    pub page: Option<usize>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+pub struct SuggestParams {
+    pub q: Option<String>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+pub struct SearchHit {
+    pub rank: usize,
+    pub doc_id: String,
+    pub score: f64,
+    pub title: String,
+    pub url: String,
+    pub snippet: String,
+}
+
+#[derive(Serialize)]
+pub struct SearchResponse {
+    pub query: String,
+    pub total_hits: usize,
+    pub page: usize,
+    pub limit: usize,
+    pub total_pages: usize,
+    pub execution_time_ms: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub did_you_mean: Option<Vec<String>>,
+    pub results: Vec<SearchHit>,
+}
+
+#[derive(Serialize)]
+pub struct HealthResponse {
+    pub status: String,
+    pub total_documents: u32,
+    pub vocabulary_size: usize,
+}
+
+// ============================================================================
+// Main Server Entrypoint
+// ============================================================================
+
+fn resolve_path(env_var: &str, candidates: &[&str]) -> String {
+    if let Ok(val) = std::env::var(env_var) {
+        return val;
+    }
+    for candidate in candidates {
+        if Path::new(candidate).exists() {
+            return candidate.to_string();
+        }
+    }
+    candidates[0].to_string()
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -489,51 +697,80 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let index_path =
-        std::env::var("INDEX_PATH").unwrap_or_else(|_| "../indexer/index.json".to_string());
-    let docs_path =
-        std::env::var("DOCS_PATH").unwrap_or_else(|_| "../crawler/documents.json".to_string());
-    let fst_path =
-        std::env::var("FST_PATH").unwrap_or_else(|_| "../indexer/dictionary.fst".to_string());
+    let index_path = resolve_path(
+        "INDEX_PATH",
+        &[
+            "../indexer/index.bin",
+            "indexer/index.bin",
+            "index.bin",
+            "/app/index.bin",
+        ],
+    );
+    let docs_path = resolve_path(
+        "DOCS_PATH",
+        &[
+            "../crawler/documents.bin",
+            "crawler/documents.bin",
+            "documents.bin",
+            "/app/documents.bin",
+        ],
+    );
+    let fst_path = resolve_path(
+        "FST_PATH",
+        &[
+            "../indexer/dictionary.fst",
+            "indexer/dictionary.fst",
+            "dictionary.fst",
+            "/app/dictionary.fst",
+        ],
+    );
 
-    println!("Loading Inverted Index from {}...", index_path);
-    let index_file = File::open(&index_path)?;
-    let index: IndexStore = serde_json::from_reader(BufReader::new(index_file))?;
+    println!("Memory-mapping Inverted Index from {}...", index_path);
+    let start_index = Instant::now();
+    let index = Arc::new(MmapIndex::open(&index_path)?);
+    println!(
+        "Index mapped in {:?}: {} docs, {} terms, avg_len={:.2}",
+        start_index.elapsed(),
+        index.total_docs,
+        index.num_terms,
+        index.avg_doc_length
+    );
 
-    println!("Loading Raw Documents from {}...", docs_path);
-    let docs_file = File::open(&docs_path)?;
-    let docs_vec: Vec<RawDocument> = serde_json::from_reader(BufReader::new(docs_file))?;
+    println!("Memory-mapping Document Store from {}...", docs_path);
+    let start_docs = Instant::now();
+    let doc_store = Arc::new(MmapDocStore::open(&docs_path)?);
+    println!(
+        "Document store mapped in {:?}: {} docs ready",
+        start_docs.elapsed(),
+        doc_store.doc_count()
+    );
 
-    let mut raw_docs_by_id = HashMap::with_capacity(docs_vec.len());
-    for doc in docs_vec {
-        raw_docs_by_id.insert(doc.id.clone(), doc);
-    }
-
-    // Load or generate FST dictionary
-    let dictionary = if let Ok(fst_bytes) = std::fs::read(&fst_path) {
-        println!("Loading Term Dictionary FST from {}...", fst_path);
-        TermDictionary::from_bytes(fst_bytes)?
+    println!("Opening Term Dictionary FST from {}...", fst_path);
+    let start_fst = Instant::now();
+    let dictionary = if Path::new(&fst_path).exists() {
+        TermDictionary::open(&fst_path)?
     } else {
-        println!(
-            "FST file not found at {}. Compiling from index terms...",
-            fst_path
-        );
-        let terms: Vec<String> = index.inverted_index.keys().cloned().collect();
-        TermDictionary::from_terms(&terms)?
+        println!("FST file not found at {fst_path}. Compiling on the fly from index.bin...");
+        TermDictionary::build_from_index(&fst_path, &index)?
     };
+    println!(
+        "Term Dictionary ready in {:?} ({} terms in lexicon)",
+        start_fst.elapsed(),
+        dictionary.len()
+    );
 
     let pipeline = TokenizerPipeline::new();
     let state = Arc::new(AppState {
         index,
-        raw_docs_by_id,
+        doc_store,
         pipeline,
         dictionary: Arc::new(dictionary),
     });
 
     println!(
-        "Engine ready! Indexed {} documents across {} terms.",
+        "Engine ready! Serving {} documents across {} terms with 0 RAM deserialization overhead.",
         state.index.total_docs,
-        state.index.inverted_index.len()
+        state.index.num_terms
     );
 
     let cors = CorsLayer::new()
@@ -558,7 +795,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// --- Handlers ---
+// ============================================================================
+// HTTP Handlers
+// ============================================================================
 
 async fn ui_handler() -> Html<&'static str> {
     Html(include_str!("index.html"))
@@ -568,7 +807,7 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse
     Json(HealthResponse {
         status: "healthy".to_string(),
         total_documents: state.index.total_docs,
-        vocabulary_size: state.index.inverted_index.len(),
+        vocabulary_size: state.index.num_terms as usize,
     })
 }
 
@@ -635,15 +874,18 @@ async fn search_handler(
     let n = state.index.total_docs as f64;
     let mut scores: HashMap<u32, f64> = HashMap::new();
 
+    // Fast BM25 scoring directly from memory-mapped postings & doc lengths
     for term in &query_terms {
-        if let Some(postings) = state.index.inverted_index.get(term) {
-            let n_q = postings.len() as f64;
-            let idf = ((n - n_q + 0.5) / (n_q + 0.5) + 1.0).ln();
+        if let Some(term_idx) = state.dictionary.get(term) {
+            if let Some(entry) = state.index.get_term_entry(term_idx as usize) {
+                let n_q = entry.doc_freq as f64;
+                let idf = ((n - n_q + 0.5) / (n_q + 0.5) + 1.0).ln();
+                let slice = state.index.get_postings_slice(&entry);
+                let iter = PostingsIterator::new(slice, entry.doc_freq as usize);
 
-            for posting in postings {
-                if let Some(meta) = state.index.doc_meta.get(&posting.doc_id) {
+                for posting in iter {
+                    let doc_len = state.index.get_doc_length(posting.doc_id) as f64;
                     let tf = posting.term_frequency as f64;
-                    let doc_len = meta.length as f64;
                     let num = tf * (k1 + 1.0);
                     let denom = tf + k1 * (1.0 - b + b * (doc_len / state.index.avg_doc_length));
                     let term_score = idf * (num / denom);
@@ -691,19 +933,20 @@ async fn search_handler(
         .collect();
 
     for (rank_idx, (doc_id, score)) in paged_results.into_iter().enumerate() {
-        if let Some(meta) = state.index.doc_meta.get(&doc_id) {
-            let snippet = if let Some(raw_doc) = state.raw_docs_by_id.get(&meta.hex_id) {
-                generate_dynamic_snippet(&raw_doc.content, &raw_tokens, 180)
+        if let Some(meta) = state.index.get_doc_meta(doc_id) {
+            // Read content slice from mmapDocStore on demand - zero document content stored in RAM
+            let snippet = if let Some(content) = state.doc_store.get_content(doc_id) {
+                generate_dynamic_snippet(content, &raw_tokens, 180)
             } else {
                 "No preview text available.".to_string()
             };
 
             hits.push(SearchHit {
                 rank: offset + rank_idx + 1,
-                doc_id: meta.hex_id.clone(),
+                doc_id: meta.hex_id.to_string(),
                 score: (score * 10000.0).round() / 10000.0,
-                title: meta.title.clone(),
-                url: meta.url.clone(),
+                title: meta.title.to_string(),
+                url: meta.url.to_string(),
                 snippet,
             });
         }
