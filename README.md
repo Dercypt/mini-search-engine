@@ -6,11 +6,14 @@ A lightweight, from-scratch search engine built in Rust. Features an asynchronou
 ---
 
 ## Features
-* **Async Crawler:** Concurrent web scraper powered by `tokio` and `reqwest`.
-* **Inverted Index:** In-memory postings list with Porter stemming and token normalization.
-* **BM25 Ranking:** Relevance scoring ($k_1 = 1.5, b = 0.75$) matching corpus rarity.
+* **Async Crawler:** Concurrent web scraper powered by `tokio` and `reqwest` with streaming binary disk output.
+* **Memory-Mapped Inverted Index (mmap):** Zero-deserialization binary inverted index powered by `memmap2`.
+* **VByte Compressed Binary Postings:** Delta-encoded postings lists compressed with Variable Byte (VByte) encoding.
+* **FST Lexicon:** Fast finite-state transducer dictionary (`fst::Map`) for prefix suggestions and Levenshtein fuzzy search.
+* **BM25 Ranking:** Relevance scoring ($k_1 = 1.5, b = 0.75$) evaluated directly from memory-mapped postings.
+* **Zero RAM Choke:** Constant-memory streaming crawler and sub-microsecond random-access document reader scalable to 500,000+ pages.
 * **Embedded UI:** Single-binary web interface and JSON API served via `axum`.
-* **Fast Retrieval:** Sub-millisecond query latency directly against memory.
+* **Fast Retrieval:** Sub-millisecond query latency directly against memory-mapped disk storage.
 
 ---
 
@@ -101,9 +104,9 @@ If `q` is missing, the API returns `400 Bad Request`.
 
 ## Architecture
 ```bash
-crawler/      Scrapes Wikipedia articles -> documents.json
-indexer/      Parses documents and builds -> index.json
-search_api/   In-memory BM25 ranker + Axum web interface
+crawler/      Scrapes Wikipedia articles -> documents.bin (mmap-ready binary store)
+indexer/      Parses documents and builds -> index.bin (VByte postings) + dictionary.fst
+search_api/   Zero-allocation mmap BM25 ranker + Axum web interface
 ```
 
 ---
