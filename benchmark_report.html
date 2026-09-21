@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<title>Benchmark Report: Custom Mmap + VByte vs. SQLite FTS5 vs. JSON</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@1,9..144,500;1,9..144,600&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  /* ---------- Design Tokens (shared with index.html) ---------- */
+  :root {
+    --paper: #F7F6F2;
+    --paper-raised: #FFFFFF;
+    --ink: #121318;
+    --ink-soft: #636674;
+    --line: #E2E0D6;
+    --line-subtle: #ECEAE2;
+    --signal: #223CE9;
+    --signal-glow: rgba(34, 60, 233, 0.12);
+    --mark: #FCE588;
+    --live: #10B981;
+    --live-ink: #047857;
+    --live-dim: rgba(16, 185, 129, 0.15);
+    --radius-sm: 6px;
+    --radius: 12px;
+    --radius-full: 9999px;
+    --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    --sans: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --serif: 'Fraunces', Georgia, serif;
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .wrap {
+    width: 100%;
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 0 20px;
+  }
+
+  a { color: inherit; text-decoration: none; }
+  :focus-visible { outline: 2px solid var(--signal); outline-offset: 3px; border-radius: 4px; }
+  svg { display: block; }
+  .icon { width: 18px; height: 18px; flex: 0 0 auto; }
+
+  /* ---------- Keyframes ---------- */
+  @keyframes riseIn {
+    from { opacity: 0; transform: translateY(14px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes fadeDown {
+    from { opacity: 0; transform: translateY(-10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes blinkCaret { 50% { opacity: 0; } }
+  @keyframes pulseDot {
+    0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.5); }
+    70% { box-shadow: 0 0 0 7px rgba(16, 185, 129, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+  }
+
+  /* ---------- Sticky Header Rail ---------- */
+  .rail {
+    position: sticky;
+    top: 0;
+    z-index: 40;
+    background: rgba(247, 246, 242, 0.94);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.3s var(--ease-out), box-shadow 0.3s var(--ease-out);
+    animation: fadeDown 0.4s var(--ease-out) both;
+  }
+  .rail.elevated {
+    border-color: var(--line);
+    box-shadow: 0 8px 24px -14px rgba(18, 19, 24, 0.1);
+  }
+  .rail-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    min-height: 64px;
+    padding-top: 4px;
+    padding-bottom: 4px;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .brand-name {
+    font-family: var(--mono);
+    font-weight: 600;
+    font-size: 0.92rem;
+    letter-spacing: -0.01em;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .brand-name .icon { width: 16px; height: 16px; color: var(--signal); }
+  .brand-sub {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    color: var(--ink-soft);
+    white-space: nowrap;
+  }
+  .rail-status {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--ink-soft);
+    white-space: nowrap;
+    background: var(--paper-raised);
+    border: 1px solid var(--line);
+    padding: 4px 10px;
+    border-radius: var(--radius-full);
+    flex-shrink: 0;
+  }
+  .live-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--live);
+    animation: pulseDot 2.2s ease-out infinite;
+  }
+
+  /* ---------- Header / Hero ---------- */
+  header.hero {
+    text-align: center;
+    padding: 56px 0 36px;
+  }
+  .hero > * {
+    opacity: 0;
+    transform: translateY(14px);
+    animation: riseIn 0.5s var(--ease-out) forwards;
+  }
+  .hero > *:nth-child(1) { animation-delay: 0.05s; }
+  .hero > *:nth-child(2) { animation-delay: 0.14s; }
+
+  h1 {
+    font-family: var(--mono);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    font-size: clamp(1.5rem, 5vw, 2.4rem);
+    margin: 0 0 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  h1 .icon { width: 0.9em; height: 0.9em; color: var(--signal); }
+  .caret {
+    display: inline-block;
+    width: 3px;
+    height: 1em;
+    background: var(--signal);
+    margin-left: 2px;
+    animation: blinkCaret 1s steps(1) infinite;
+  }
+  p.subtitle {
+    font-family: var(--sans);
+    font-size: 1rem;
+    line-height: 1.6;
+    color: var(--ink-soft);
+    max-width: 520px;
+    margin: 0 auto;
+  }
+
+  main { flex: 1; padding-bottom: 48px; }
+
+  /* ---------- Stat Cards ---------- */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 14px;
+    margin-bottom: 28px;
+  }
+  .stat-card {
+    background: var(--paper-raised);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 18px 20px;
+    transition: transform 0.25s var(--ease-out), box-shadow 0.25s var(--ease-out), border-color 0.25s var(--ease-out);
+  }
+  .stat-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 24px -10px rgba(18, 19, 24, 0.1);
+    border-color: #B5B3A8;
+  }
+  .stat-label {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--ink-soft);
+    margin-bottom: 8px;
+  }
+  .stat-value {
+    font-family: var(--serif);
+    font-style: italic;
+    font-weight: 600;
+    font-size: 2.1rem;
+    line-height: 1.1;
+    color: var(--ink);
+  }
+  .stat-subtext {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--live-ink);
+    background: var(--live-dim);
+    padding: 3px 8px;
+    border-radius: var(--radius-full);
+    margin-top: 10px;
+  }
+
+  /* ---------- Section Cards ---------- */
+  .card {
+    background: var(--paper-raised);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    overflow: hidden;
+    margin-bottom: 28px;
+  }
+  .card-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 16px 22px;
+    border-bottom: 1px dashed var(--line);
+    background: #F3F1EC;
+  }
+  .card-hole {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--paper);
+    border: 1px solid var(--line);
+    flex: 0 0 auto;
+  }
+  h2 {
+    font-family: var(--mono);
+    font-size: 0.94rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    margin: 0;
+    color: var(--ink);
+  }
+  .table-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* ---------- Tables ---------- */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    text-align: left;
+    font-size: 0.9rem;
+  }
+  th {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: var(--ink-soft);
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+    background: var(--paper-raised);
+  }
+  td {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--line-subtle);
+    color: #373942;
+    vertical-align: middle;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  td strong { color: var(--ink); font-weight: 600; }
+  tbody tr { transition: background 0.15s ease; }
+  tbody tr:hover td { background: #FAF9F5; }
+  #perf-table td:not(:first-child),
+  #perf-table th:not(:first-child) { font-family: var(--mono); font-size: 0.8rem; }
+  #perf-table td:not(:first-child) { white-space: nowrap; }
+
+  /* ---------- Badges ---------- */
+  .badge-best {
+    display: inline-block;
+    background: var(--live-dim);
+    color: var(--live-ink);
+    padding: 3px 8px;
+    border-radius: var(--radius-full);
+    font-weight: 600;
+  }
+  .badge-ratio {
+    display: inline-block;
+    background: var(--signal-glow);
+    color: var(--signal);
+    padding: 3px 8px;
+    border-radius: var(--radius-full);
+    font-weight: 600;
+  }
+
+  code {
+    font-family: var(--mono);
+    background: #F3F1EC;
+    border: 1px solid var(--line-subtle);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.82em;
+    color: var(--signal);
+  }
+
+  /* ---------- Footer ---------- */
+  .footer {
+    text-align: center;
+    font-family: var(--mono);
+    color: var(--ink-soft);
+    font-size: 0.72rem;
+    line-height: 1.8;
+    padding: 24px 20px 40px;
+    border-top: 1px solid var(--line);
+    margin-top: 12px;
+  }
+
+  /* ---------- Mobile ---------- */
+  @media (max-width: 680px) {
+    .wrap { padding-left: 16px; padding-right: 16px; }
+    .rail-inner { gap: 10px; min-height: 56px; }
+    .brand-sub { display: none; }
+    .rail-status { padding: 4px 8px; font-size: 0.65rem; }
+    header.hero { padding: 36px 0 24px; }
+    .stat-value { font-size: 1.8rem; }
+    .card-head { padding: 14px 16px; }
+    th, td { padding: 12px 14px; }
+    table { min-width: 640px; }
+    #files-table { min-width: 560px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+</style>
+</head>
+<body>
+
+  <!-- Sticky Top Header Rail -->
+  <div class="rail" id="rail">
+    <div class="wrap rail-inner">
+      <div class="brand">
+        <span class="brand-name">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><line x1="20" y1="20" x2="15.5" y2="15.5"/></svg>
+          mini_search
+        </span>
+        <span class="brand-sub">rust · bm25 · inverted index</span>
+      </div>
+      <div class="rail-status">
+        <span class="live-dot" aria-hidden="true"></span>
+        <span>benchmark report</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <header class="hero">
+      <h1>
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><line x1="20" y1="20" x2="15.5" y2="15.5"/></svg>
+        mini search engine benchmark <span class="caret" aria-hidden="true"></span>
+      </h1>
+      <p class="subtitle">Evaluated on 1,000 Wikipedia articles (41,476 terms &bull; 1,502,700 tokens) on macOS</p>
+    </header>
+  </div>
+
+  <main class="wrap">
+
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">Index Compression</div>
+        <div class="stat-value">16.6x</div>
+        <div class="stat-subtext">34.3 MB &rarr; 2.06 MB</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Startup Speedup</div>
+        <div class="stat-value">2,204x</div>
+        <div class="stat-subtext">379 ms &rarr; 172 &micro;s</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">vs. SQLite Query Speed</div>
+        <div class="stat-value">26.4x</div>
+        <div class="stat-subtext">66 &micro;s vs. 1.75 ms</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Throughput (QPS)</div>
+        <div class="stat-value">15,114</div>
+        <div class="stat-subtext">vs. 573 QPS in SQLite</div>
+      </div>
+    </div>
+
+    <section class="card">
+      <div class="card-head">
+        <span class="card-hole" aria-hidden="true"></span>
+        <h2>Performance Comparison</h2>
+      </div>
+      <div class="table-scroll">
+        <table id="perf-table">
+          <thead>
+            <tr>
+              <th>Metric</th>
+              <th>Old (JSON + serde_json)</th>
+              <th>Custom (mmap + VByte)</th>
+              <th>SQLite (FTS5)</th>
+              <th>Custom vs. SQLite</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Inverted Index Size</strong></td>
+              <td>34.29 MB</td>
+              <td><span class="badge-best">2.06 MB</span></td>
+              <td>20.57 MB</td>
+              <td><span class="badge-ratio">10.0x smaller</span></td>
+            </tr>
+            <tr>
+              <td><strong>Startup / Load Time</strong></td>
+              <td>379.08 ms</td>
+              <td><span class="badge-best">172.05 &micro;s</span></td>
+              <td>~15 ms</td>
+              <td><span class="badge-ratio">87x – 2,200x faster</span></td>
+            </tr>
+            <tr>
+              <td><strong>Memory Deserialization</strong></td>
+              <td>Full JSON in Heap RAM</td>
+              <td><span class="badge-best">0 MB (Paging on-demand)</span></td>
+              <td>SQLite Page Cache</td>
+              <td><span class="badge-ratio">Zero Heap Alloc</span></td>
+            </tr>
+            <tr>
+              <td><strong>Mean Query Latency</strong></td>
+              <td>75.8 &micro;s</td>
+              <td><span class="badge-best">66.1 &micro;s</span></td>
+              <td>1,746 &micro;s (1.75 ms)</td>
+              <td><span class="badge-ratio">26.4x faster</span></td>
+            </tr>
+            <tr>
+              <td><strong>Median (p50) Latency</strong></td>
+              <td>70.5 &micro;s</td>
+              <td><span class="badge-best">55.3 &micro;s</span></td>
+              <td>1,528 &micro;s (1.53 ms)</td>
+              <td><span class="badge-ratio">27.6x faster</span></td>
+            </tr>
+            <tr>
+              <td><strong>p95 Latency</strong></td>
+              <td>144.3 &micro;s</td>
+              <td><span class="badge-best">98.6 &micro;s</span></td>
+              <td>3,527 &micro;s (3.53 ms)</td>
+              <td><span class="badge-ratio">35.7x faster</span></td>
+            </tr>
+            <tr>
+              <td><strong>p99 Latency</strong></td>
+              <td>185.7 &micro;s</td>
+              <td><span class="badge-best">150.8 &micro;s</span></td>
+              <td>6,979 &micro;s (6.98 ms)</td>
+              <td><span class="badge-ratio">46.2x faster</span></td>
+            </tr>
+            <tr>
+              <td><strong>Query Throughput</strong></td>
+              <td>13,181 QPS</td>
+              <td><span class="badge-best">15,114 QPS</span></td>
+              <td>573 QPS</td>
+              <td><span class="badge-ratio">26.3x higher QPS</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <span class="card-hole" aria-hidden="true"></span>
+        <h2>File Locations &amp; Artifacts</h2>
+      </div>
+      <div class="table-scroll">
+        <table id="files-table">
+          <thead>
+            <tr>
+              <th>Artifact</th>
+              <th>Location</th>
+              <th>Size</th>
+              <th>Type</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Custom Index</td>
+              <td><code>indexer/index.bin</code></td>
+              <td>2.06 MB</td>
+              <td>Memory-mapped VByte binary postings</td>
+            </tr>
+            <tr>
+              <td>Custom Lexicon</td>
+              <td><code>indexer/dictionary.fst</code></td>
+              <td>256 KB</td>
+              <td>Memory-mapped FST Map</td>
+            </tr>
+            <tr>
+              <td>Custom Doc Store</td>
+              <td><code>crawler/documents.bin</code></td>
+              <td>26.23 MB</td>
+              <td>Memory-mapped binary store</td>
+            </tr>
+            <tr>
+              <td>Legacy Index</td>
+              <td><code>indexer/index.json</code></td>
+              <td>34.29 MB</td>
+              <td>Uncompressed JSON text</td>
+            </tr>
+            <tr>
+              <td>Legacy Doc Store</td>
+              <td><code>crawler/documents.json</code></td>
+              <td>26.57 MB</td>
+              <td>Uncompressed JSON text</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+
+  <div class="footer">
+    generated for mini search engine &bull; run <code>cargo run --release</code> in scratch/bench_comparison to reproduce
+  </div>
+
+<script>
+  const rail = document.getElementById('rail');
+  window.addEventListener('scroll', () => {
+    rail.classList.toggle('elevated', window.scrollY > 4);
+  }, { passive: true });
+</script>
+</body>
+</html>
