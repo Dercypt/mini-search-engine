@@ -74,7 +74,8 @@ impl DocStoreWriter {
         let mut written = 0u32;
 
         let id_bytes = id.as_bytes();
-        self.file.write_all(&(id_bytes.len() as u16).to_le_bytes())?;
+        self.file
+            .write_all(&(id_bytes.len() as u16).to_le_bytes())?;
         self.file.write_all(id_bytes)?;
         written += 2 + id_bytes.len() as u32;
 
@@ -180,9 +181,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Dedicated background writer task: streams docs to disk with low memory footprint
     let writer_handle = tokio::spawn(async move {
-        let mut bin_writer = DocStoreWriter::create("documents.bin").expect("failed to create documents.bin");
-        let mut json_writer = BufWriter::new(File::create("documents.json").expect("failed to create documents.json"));
-        json_writer.write_all(b"[\n").expect("failed to write json header");
+        let mut bin_writer =
+            DocStoreWriter::create("documents.bin").expect("failed to create documents.bin");
+        let mut json_writer = BufWriter::new(
+            File::create("documents.json").expect("failed to create documents.json"),
+        );
+        json_writer
+            .write_all(b"[\n")
+            .expect("failed to write json header");
         let mut first = true;
 
         while let Some(doc) = doc_rx.recv().await {
@@ -191,17 +197,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("failed to append to documents.bin");
 
             if !first {
-                json_writer.write_all(b",\n").expect("failed to write json separator");
+                json_writer
+                    .write_all(b",\n")
+                    .expect("failed to write json separator");
             }
             first = false;
             let json = serde_json::to_string(&doc).expect("failed to serialize doc");
-            json_writer.write_all(json.as_bytes()).expect("failed to write json doc");
+            json_writer
+                .write_all(json.as_bytes())
+                .expect("failed to write json doc");
         }
 
-        json_writer.write_all(b"\n]\n").expect("failed to write json footer");
+        json_writer
+            .write_all(b"\n]\n")
+            .expect("failed to write json footer");
         json_writer.flush().expect("failed to flush json");
-        let count = bin_writer.finish().expect("failed to finish documents.bin");
-        count
+        bin_writer.finish().expect("failed to finish documents.bin")
     });
 
     while let Some(current_url) = rx.recv().await {
@@ -263,19 +274,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let base_url = Url::parse("https://en.wikipedia.org").unwrap();
 
                 for element in document.select(&link_selector) {
-                    if let Some(href) = element.value().attr("href") {
-                        if let Ok(resolved) = base_url.join(href) {
-                            if resolved.host_str() == Some("en.wikipedia.org") {
-                                if let Some(normalized) = normalize_url(resolved.as_str()) {
-                                    // Skip self-links and unwanted namespace paths
-                                    if normalized != current_url
-                                        && !disallowed.iter().any(|re| re.is_match(&normalized))
-                                    {
-                                        outgoing_set.insert(normalized);
-                                    }
-                                }
-                            }
-                        }
+                    if let Some(href) = element.value().attr("href")
+                        && let Ok(resolved) = base_url.join(href)
+                        && resolved.host_str() == Some("en.wikipedia.org")
+                        && let Some(normalized) = normalize_url(resolved.as_str())
+                        && normalized != current_url
+                        && !disallowed.iter().any(|re| re.is_match(&normalized))
+                    {
+                        outgoing_set.insert(normalized);
                     }
                 }
 
@@ -421,4 +427,3 @@ mod tests {
         assert!(hash1.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }
-

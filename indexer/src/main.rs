@@ -83,7 +83,7 @@ pub fn encode_postings(postings: &[Posting], buf: &mut Vec<u8>) {
         let delta = if i == 0 {
             p.doc_id
         } else {
-            p.doc_id.checked_sub(last_doc_id).unwrap_or(0)
+            p.doc_id.saturating_sub(last_doc_id)
         };
         last_doc_id = p.doc_id;
         encode_vbyte(delta, buf);
@@ -179,7 +179,8 @@ impl DocStoreWriter {
         let mut written = 0u32;
 
         let id_bytes = id.as_bytes();
-        self.file.write_all(&(id_bytes.len() as u16).to_le_bytes())?;
+        self.file
+            .write_all(&(id_bytes.len() as u16).to_le_bytes())?;
         self.file.write_all(id_bytes)?;
         written += 2 + id_bytes.len() as u32;
 
@@ -275,9 +276,11 @@ impl MmapDocStore {
         if entry_offset + 12 > self.mmap.len() {
             return None;
         }
-        let offset =
-            u64::from_le_bytes(self.mmap[entry_offset..entry_offset + 8].try_into().unwrap())
-                as usize;
+        let offset = u64::from_le_bytes(
+            self.mmap[entry_offset..entry_offset + 8]
+                .try_into()
+                .unwrap(),
+        ) as usize;
         let len = u32::from_le_bytes(
             self.mmap[entry_offset + 8..entry_offset + 12]
                 .try_into()
@@ -328,12 +331,9 @@ impl MmapDocStore {
         if pos + 4 > slice.len() {
             return None;
         }
-        let content_len = u32::from_le_bytes([
-            slice[pos],
-            slice[pos + 1],
-            slice[pos + 2],
-            slice[pos + 3],
-        ]) as usize;
+        let content_len =
+            u32::from_le_bytes([slice[pos], slice[pos + 1], slice[pos + 2], slice[pos + 3]])
+                as usize;
         pos += 4;
         if pos + content_len > slice.len() {
             return None;
@@ -372,7 +372,10 @@ pub fn convert_json_to_bin_if_needed(json_path: &str, bin_path: &str) -> std::io
         writer.append(&doc.id, &doc.url, &doc.title, &doc.content, &doc.links)?;
     }
     let count = writer.finish()?;
-    println!("Converted {count} documents to {bin_path} in {:?}", start.elapsed());
+    println!(
+        "Converted {count} documents to {bin_path} in {:?}",
+        start.elapsed()
+    );
     Ok(())
 }
 
@@ -457,7 +460,10 @@ impl BinaryIndexWriter {
         let mut term_entries = Vec::with_capacity(sorted_terms.len());
 
         for term in sorted_terms {
-            let postings = inverted_index.get(term).map(|v| v.as_slice()).unwrap_or(&[]);
+            let postings = inverted_index
+                .get(term)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
             let p_offset = postings_bytes.len() as u64;
             let mut buf = Vec::new();
             encode_postings(postings, &mut buf);
@@ -622,11 +628,7 @@ impl MmapIndex {
         pos += 2;
         let title = std::str::from_utf8(&slice[pos..pos + title_len]).ok()?;
 
-        Some(DocMetaRef {
-            hex_id,
-            url,
-            title,
-        })
+        Some(DocMetaRef { hex_id, url, title })
     }
 
     #[inline]
@@ -720,12 +722,12 @@ impl TermDictionary {
         let mut matched = Vec::with_capacity(limit);
 
         while let Some((bytes, _val)) = stream.next() {
-            if let Ok(s) = std::str::from_utf8(bytes) {
-                if s != term_lower {
-                    matched.push(s.to_string());
-                    if matched.len() >= limit {
-                        break;
-                    }
+            if let Ok(s) = std::str::from_utf8(bytes)
+                && s != term_lower
+            {
+                matched.push(s.to_string());
+                if matched.len() >= limit {
+                    break;
                 }
             }
         }
@@ -743,28 +745,189 @@ pub struct TokenizerPipeline {
     regex: Regex,
 }
 
+impl Default for TokenizerPipeline {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TokenizerPipeline {
     pub fn new() -> Self {
         let stop_words: HashSet<&'static str> = [
-            "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any",
-            "are", "aren't", "as", "at", "be", "because", "been", "before", "being", "below",
-            "between", "both", "but", "by", "can't", "cannot", "could", "couldn't", "did",
-            "didn't", "do", "does", "doesn't", "doing", "don't", "down", "during", "each",
-            "few", "for", "from", "further", "had", "hadn't", "has", "hasn't", "have",
-            "haven't", "having", "he", "he'd", "he'll", "he's", "her", "here", "here's", "hers",
-            "herself", "him", "himself", "his", "how", "how's", "i", "i'd", "i'll", "i'm",
-            "i've", "if", "in", "into", "is", "isn't", "it", "it's", "its", "itself", "let's",
-            "me", "more", "most", "mustn't", "my", "myself", "no", "nor", "not", "of", "off",
-            "on", "once", "only", "or", "other", "ought", "our", "ours", "ourselves", "out",
-            "over", "own", "same", "shan't", "she", "she'd", "she'll", "she's", "should",
-            "shouldn't", "so", "some", "such", "than", "that", "that's", "the", "their",
-            "theirs", "them", "themselves", "then", "there", "there's", "these", "they",
-            "they'd", "they'll", "they're", "they've", "this", "those", "through", "to", "too",
-            "under", "until", "up", "very", "was", "wasn't", "we", "we'd", "we'll", "we're",
-            "we've", "were", "weren't", "what", "what's", "when", "when's", "where", "where's",
-            "which", "while", "who", "who's", "whom", "why", "why's", "with", "won't", "would",
-            "wouldn't", "you", "you'd", "you'll", "you're", "you've", "your", "yours",
-            "yourself", "yourselves",
+            "a",
+            "about",
+            "above",
+            "after",
+            "again",
+            "against",
+            "all",
+            "am",
+            "an",
+            "and",
+            "any",
+            "are",
+            "aren't",
+            "as",
+            "at",
+            "be",
+            "because",
+            "been",
+            "before",
+            "being",
+            "below",
+            "between",
+            "both",
+            "but",
+            "by",
+            "can't",
+            "cannot",
+            "could",
+            "couldn't",
+            "did",
+            "didn't",
+            "do",
+            "does",
+            "doesn't",
+            "doing",
+            "don't",
+            "down",
+            "during",
+            "each",
+            "few",
+            "for",
+            "from",
+            "further",
+            "had",
+            "hadn't",
+            "has",
+            "hasn't",
+            "have",
+            "haven't",
+            "having",
+            "he",
+            "he'd",
+            "he'll",
+            "he's",
+            "her",
+            "here",
+            "here's",
+            "hers",
+            "herself",
+            "him",
+            "himself",
+            "his",
+            "how",
+            "how's",
+            "i",
+            "i'd",
+            "i'll",
+            "i'm",
+            "i've",
+            "if",
+            "in",
+            "into",
+            "is",
+            "isn't",
+            "it",
+            "it's",
+            "its",
+            "itself",
+            "let's",
+            "me",
+            "more",
+            "most",
+            "mustn't",
+            "my",
+            "myself",
+            "no",
+            "nor",
+            "not",
+            "of",
+            "off",
+            "on",
+            "once",
+            "only",
+            "or",
+            "other",
+            "ought",
+            "our",
+            "ours",
+            "ourselves",
+            "out",
+            "over",
+            "own",
+            "same",
+            "shan't",
+            "she",
+            "she'd",
+            "she'll",
+            "she's",
+            "should",
+            "shouldn't",
+            "so",
+            "some",
+            "such",
+            "than",
+            "that",
+            "that's",
+            "the",
+            "their",
+            "theirs",
+            "them",
+            "themselves",
+            "then",
+            "there",
+            "there's",
+            "these",
+            "they",
+            "they'd",
+            "they'll",
+            "they're",
+            "they've",
+            "this",
+            "those",
+            "through",
+            "to",
+            "too",
+            "under",
+            "until",
+            "up",
+            "very",
+            "was",
+            "wasn't",
+            "we",
+            "we'd",
+            "we'll",
+            "we're",
+            "we've",
+            "were",
+            "weren't",
+            "what",
+            "what's",
+            "when",
+            "when's",
+            "where",
+            "where's",
+            "which",
+            "while",
+            "who",
+            "who's",
+            "whom",
+            "why",
+            "why's",
+            "with",
+            "won't",
+            "would",
+            "wouldn't",
+            "you",
+            "you'd",
+            "you'll",
+            "you're",
+            "you've",
+            "your",
+            "yours",
+            "yourself",
+            "yourselves",
         ]
         .into_iter()
         .collect();
@@ -881,13 +1044,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         for (term, tf) in tf_map {
-            inverted_index
-                .entry(term)
-                .or_default()
-                .push(Posting {
-                    doc_id,
-                    term_frequency: tf,
-                });
+            inverted_index.entry(term).or_default().push(Posting {
+                doc_id,
+                term_frequency: tf,
+            });
         }
     }
 
@@ -1035,20 +1195,20 @@ pub fn search_bm25_mmap<'a>(
     let n = index.total_docs as f64;
 
     for term in &query_terms {
-        if let Some(term_idx) = dictionary.get(term) {
-            if let Some(entry) = index.get_term_entry(term_idx as usize) {
-                let n_q = entry.doc_freq as f64;
-                let idf = bm25_idf(n, n_q);
-                let postings_slice = index.get_postings_slice(&entry);
-                let iter = PostingsIterator::new(postings_slice, entry.doc_freq as usize);
+        if let Some(term_idx) = dictionary.get(term)
+            && let Some(entry) = index.get_term_entry(term_idx as usize)
+        {
+            let n_q = entry.doc_freq as f64;
+            let idf = bm25_idf(n, n_q);
+            let postings_slice = index.get_postings_slice(&entry);
+            let iter = PostingsIterator::new(postings_slice, entry.doc_freq as usize);
 
-                for posting in iter {
-                    let doc_len = index.get_doc_length(posting.doc_id) as f64;
-                    let tf = posting.term_frequency as f64;
-                    let term_score = idf * bm25_tf_weight(tf, doc_len, index.avg_doc_length, k1, b);
+            for posting in iter {
+                let doc_len = index.get_doc_length(posting.doc_id) as f64;
+                let tf = posting.term_frequency as f64;
+                let term_score = idf * bm25_tf_weight(tf, doc_len, index.avg_doc_length, k1, b);
 
-                    *scores.entry(posting.doc_id).or_insert(0.0) += term_score;
-                }
+                *scores.entry(posting.doc_id).or_insert(0.0) += term_score;
             }
         }
     }
@@ -1077,19 +1237,19 @@ mod tests {
             0u32,
             1,
             63,
-            127,        // 1 byte boundary (0x7F)
-            128,        // 2 byte boundary (0x80)
+            127, // 1 byte boundary (0x7F)
+            128, // 2 byte boundary (0x80)
             129,
             255,
             256,
-            16383,      // 2 byte max ((1 << 14) - 1)
-            16384,      // 3 byte boundary (1 << 14)
+            16383, // 2 byte max ((1 << 14) - 1)
+            16384, // 3 byte boundary (1 << 14)
             65535,
             65536,
-            2097151,    // 3 byte max ((1 << 21) - 1)
-            2097152,    // 4 byte boundary (1 << 21)
-            268435455,  // 4 byte max ((1 << 28) - 1)
-            268435456,  // 5 byte boundary (1 << 28)
+            2097151,   // 3 byte max ((1 << 21) - 1)
+            2097152,   // 4 byte boundary (1 << 21)
+            268435455, // 4 byte max ((1 << 28) - 1)
+            268435456, // 5 byte boundary (1 << 28)
             u32::MAX - 1,
             u32::MAX,
         ];
@@ -1116,13 +1276,29 @@ mod tests {
             let mut offset = 0;
             let decoded = decode_vbyte(&buf, &mut offset);
             assert_eq!(decoded, Some(val), "Failed roundtrip for value {}", val);
-            assert_eq!(offset, buf.len(), "Did not consume full buffer for value {}", val);
+            assert_eq!(
+                offset,
+                buf.len(),
+                "Did not consume full buffer for value {}",
+                val
+            );
         }
     }
 
     #[test]
     fn test_vbyte_roundtrip_sequential_stream() {
-        let values = [0u32, 1, 42, 127, 128, 500, 16384, 99999, 1_000_000, u32::MAX];
+        let values = [
+            0u32,
+            1,
+            42,
+            127,
+            128,
+            500,
+            16384,
+            99999,
+            1_000_000,
+            u32::MAX,
+        ];
         let mut buf = Vec::new();
 
         for &v in &values {
@@ -1166,11 +1342,26 @@ mod tests {
     #[test]
     fn test_delta_decoding_roundtrip() {
         let original_postings = vec![
-            Posting { doc_id: 10, term_frequency: 1 },
-            Posting { doc_id: 15, term_frequency: 3 },
-            Posting { doc_id: 42, term_frequency: 2 },
-            Posting { doc_id: 100, term_frequency: 10 },
-            Posting { doc_id: 105, term_frequency: 1 },
+            Posting {
+                doc_id: 10,
+                term_frequency: 1,
+            },
+            Posting {
+                doc_id: 15,
+                term_frequency: 3,
+            },
+            Posting {
+                doc_id: 42,
+                term_frequency: 2,
+            },
+            Posting {
+                doc_id: 100,
+                term_frequency: 10,
+            },
+            Posting {
+                doc_id: 105,
+                term_frequency: 1,
+            },
         ];
 
         let mut buf = Vec::new();
@@ -1185,9 +1376,18 @@ mod tests {
     #[test]
     fn test_delta_decoding_first_doc_zero() {
         let original_postings = vec![
-            Posting { doc_id: 0, term_frequency: 5 },
-            Posting { doc_id: 1, term_frequency: 2 },
-            Posting { doc_id: 2, term_frequency: 1 },
+            Posting {
+                doc_id: 0,
+                term_frequency: 5,
+            },
+            Posting {
+                doc_id: 1,
+                term_frequency: 2,
+            },
+            Posting {
+                doc_id: 2,
+                term_frequency: 1,
+            },
         ];
 
         let mut buf = Vec::new();
@@ -1202,10 +1402,22 @@ mod tests {
     #[test]
     fn test_delta_decoding_large_gaps() {
         let original_postings = vec![
-            Posting { doc_id: 5, term_frequency: 1 },
-            Posting { doc_id: 1_000, term_frequency: 4 },
-            Posting { doc_id: 100_000, term_frequency: 2 },
-            Posting { doc_id: 5_000_000, term_frequency: 8 },
+            Posting {
+                doc_id: 5,
+                term_frequency: 1,
+            },
+            Posting {
+                doc_id: 1_000,
+                term_frequency: 4,
+            },
+            Posting {
+                doc_id: 100_000,
+                term_frequency: 2,
+            },
+            Posting {
+                doc_id: 5_000_000,
+                term_frequency: 8,
+            },
         ];
 
         let mut buf = Vec::new();
@@ -1225,7 +1437,10 @@ mod tests {
         assert!(empty_results.is_empty());
 
         // Single posting
-        let single = vec![Posting { doc_id: 777, term_frequency: 13 }];
+        let single = vec![Posting {
+            doc_id: 777,
+            term_frequency: 13,
+        }];
         let mut buf = Vec::new();
         encode_postings(&single, &mut buf);
 
@@ -1239,11 +1454,11 @@ mod tests {
         // Test that deltas [10, 5, 20] decode into absolute doc_ids [10, 15, 35]
         let mut buf = Vec::new();
         encode_vbyte(10, &mut buf); // doc_id delta: 10
-        encode_vbyte(2, &mut buf);  // tf: 2
-        encode_vbyte(5, &mut buf);  // doc_id delta: 5 -> doc_id: 15
-        encode_vbyte(1, &mut buf);  // tf: 1
+        encode_vbyte(2, &mut buf); // tf: 2
+        encode_vbyte(5, &mut buf); // doc_id delta: 5 -> doc_id: 15
+        encode_vbyte(1, &mut buf); // tf: 1
         encode_vbyte(20, &mut buf); // doc_id delta: 20 -> doc_id: 35
-        encode_vbyte(4, &mut buf);  // tf: 4
+        encode_vbyte(4, &mut buf); // tf: 4
 
         let iter = PostingsIterator::new(&buf, 3);
         let decoded: Vec<Posting> = iter.collect();
@@ -1251,9 +1466,18 @@ mod tests {
         assert_eq!(
             decoded,
             vec![
-                Posting { doc_id: 10, term_frequency: 2 },
-                Posting { doc_id: 15, term_frequency: 1 },
-                Posting { doc_id: 35, term_frequency: 4 },
+                Posting {
+                    doc_id: 10,
+                    term_frequency: 2
+                },
+                Posting {
+                    doc_id: 15,
+                    term_frequency: 1
+                },
+                Posting {
+                    doc_id: 35,
+                    term_frequency: 4
+                },
             ]
         );
     }
@@ -1358,4 +1582,3 @@ mod tests {
         assert!(score > 0.0);
     }
 }
-
