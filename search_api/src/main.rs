@@ -143,9 +143,11 @@ impl MmapDocStore {
         if entry_offset + 12 > self.mmap.len() {
             return None;
         }
-        let offset =
-            u64::from_le_bytes(self.mmap[entry_offset..entry_offset + 8].try_into().unwrap())
-                as usize;
+        let offset = u64::from_le_bytes(
+            self.mmap[entry_offset..entry_offset + 8]
+                .try_into()
+                .unwrap(),
+        ) as usize;
         let len = u32::from_le_bytes(
             self.mmap[entry_offset + 8..entry_offset + 12]
                 .try_into()
@@ -196,12 +198,9 @@ impl MmapDocStore {
         if pos + 4 > slice.len() {
             return None;
         }
-        let content_len = u32::from_le_bytes([
-            slice[pos],
-            slice[pos + 1],
-            slice[pos + 2],
-            slice[pos + 3],
-        ]) as usize;
+        let content_len =
+            u32::from_le_bytes([slice[pos], slice[pos + 1], slice[pos + 2], slice[pos + 3]])
+                as usize;
         pos += 4;
         if pos + content_len > slice.len() {
             return None;
@@ -333,11 +332,7 @@ impl MmapIndex {
         pos += 2;
         let title = std::str::from_utf8(&slice[pos..pos + title_len]).ok()?;
 
-        Some(DocMetaRef {
-            hex_id,
-            url,
-            title,
-        })
+        Some(DocMetaRef { hex_id, url, title })
     }
 
     #[inline]
@@ -425,6 +420,11 @@ impl TermDictionary {
         self.fst_map.len()
     }
 
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.fst_map.is_empty()
+    }
+
     pub fn suggest_prefix(&self, prefix: &str, limit: usize) -> Vec<String> {
         let prefix_lower = prefix.to_lowercase();
         let prefix_matcher = Str::new(&prefix_lower).starts_with();
@@ -453,12 +453,12 @@ impl TermDictionary {
         let mut matched = Vec::with_capacity(limit);
 
         while let Some((bytes, _val)) = stream.next() {
-            if let Ok(s) = std::str::from_utf8(bytes) {
-                if s != term_lower {
-                    matched.push(s.to_string());
-                    if matched.len() >= limit {
-                        break;
-                    }
+            if let Ok(s) = std::str::from_utf8(bytes)
+                && s != term_lower
+            {
+                matched.push(s.to_string());
+                if matched.len() >= limit {
+                    break;
                 }
             }
         }
@@ -477,28 +477,189 @@ pub struct TokenizerPipeline {
     regex: Regex,
 }
 
+impl Default for TokenizerPipeline {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TokenizerPipeline {
     pub fn new() -> Self {
         let stop_words: HashSet<&'static str> = [
-            "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any",
-            "are", "aren't", "as", "at", "be", "because", "been", "before", "being", "below",
-            "between", "both", "but", "by", "can't", "cannot", "could", "couldn't", "did",
-            "didn't", "do", "does", "doesn't", "doing", "don't", "down", "during", "each",
-            "few", "for", "from", "further", "had", "hadn't", "has", "hasn't", "have",
-            "haven't", "having", "he", "he'd", "he'll", "he's", "her", "here", "here's", "hers",
-            "herself", "him", "himself", "his", "how", "how's", "i", "i'd", "i'll", "i'm",
-            "i've", "if", "in", "into", "is", "isn't", "it", "it's", "its", "itself", "let's",
-            "me", "more", "most", "mustn't", "my", "myself", "no", "nor", "not", "of", "off",
-            "on", "once", "only", "or", "other", "ought", "our", "ours", "ourselves", "out",
-            "over", "own", "same", "shan't", "she", "she'd", "she'll", "she's", "should",
-            "shouldn't", "so", "some", "such", "than", "that", "that's", "the", "their",
-            "theirs", "them", "themselves", "then", "there", "there's", "these", "they",
-            "they'd", "they'll", "they're", "they've", "this", "those", "through", "to", "too",
-            "under", "until", "up", "very", "was", "wasn't", "we", "we'd", "we'll", "we're",
-            "we've", "were", "weren't", "what", "what's", "when", "when's", "where", "where's",
-            "which", "while", "who", "who's", "whom", "why", "why's", "with", "won't", "would",
-            "wouldn't", "you", "you'd", "you'll", "you're", "you've", "your", "yours",
-            "yourself", "yourselves",
+            "a",
+            "about",
+            "above",
+            "after",
+            "again",
+            "against",
+            "all",
+            "am",
+            "an",
+            "and",
+            "any",
+            "are",
+            "aren't",
+            "as",
+            "at",
+            "be",
+            "because",
+            "been",
+            "before",
+            "being",
+            "below",
+            "between",
+            "both",
+            "but",
+            "by",
+            "can't",
+            "cannot",
+            "could",
+            "couldn't",
+            "did",
+            "didn't",
+            "do",
+            "does",
+            "doesn't",
+            "doing",
+            "don't",
+            "down",
+            "during",
+            "each",
+            "few",
+            "for",
+            "from",
+            "further",
+            "had",
+            "hadn't",
+            "has",
+            "hasn't",
+            "have",
+            "haven't",
+            "having",
+            "he",
+            "he'd",
+            "he'll",
+            "he's",
+            "her",
+            "here",
+            "here's",
+            "hers",
+            "herself",
+            "him",
+            "himself",
+            "his",
+            "how",
+            "how's",
+            "i",
+            "i'd",
+            "i'll",
+            "i'm",
+            "i've",
+            "if",
+            "in",
+            "into",
+            "is",
+            "isn't",
+            "it",
+            "it's",
+            "its",
+            "itself",
+            "let's",
+            "me",
+            "more",
+            "most",
+            "mustn't",
+            "my",
+            "myself",
+            "no",
+            "nor",
+            "not",
+            "of",
+            "off",
+            "on",
+            "once",
+            "only",
+            "or",
+            "other",
+            "ought",
+            "our",
+            "ours",
+            "ourselves",
+            "out",
+            "over",
+            "own",
+            "same",
+            "shan't",
+            "she",
+            "she'd",
+            "she'll",
+            "she's",
+            "should",
+            "shouldn't",
+            "so",
+            "some",
+            "such",
+            "than",
+            "that",
+            "that's",
+            "the",
+            "their",
+            "theirs",
+            "them",
+            "themselves",
+            "then",
+            "there",
+            "there's",
+            "these",
+            "they",
+            "they'd",
+            "they'll",
+            "they're",
+            "they've",
+            "this",
+            "those",
+            "through",
+            "to",
+            "too",
+            "under",
+            "until",
+            "up",
+            "very",
+            "was",
+            "wasn't",
+            "we",
+            "we'd",
+            "we'll",
+            "we're",
+            "we've",
+            "were",
+            "weren't",
+            "what",
+            "what's",
+            "when",
+            "when's",
+            "where",
+            "where's",
+            "which",
+            "while",
+            "who",
+            "who's",
+            "whom",
+            "why",
+            "why's",
+            "with",
+            "won't",
+            "would",
+            "wouldn't",
+            "you",
+            "you'd",
+            "you'll",
+            "you're",
+            "you've",
+            "your",
+            "yours",
+            "yourself",
+            "yourselves",
         ]
         .into_iter()
         .collect();
@@ -769,8 +930,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(
         "Engine ready! Serving {} documents across {} terms with 0 RAM deserialization overhead.",
-        state.index.total_docs,
-        state.index.num_terms
+        state.index.total_docs, state.index.num_terms
     );
 
     let cors = CorsLayer::new()
@@ -908,20 +1068,21 @@ async fn search_handler(
 
     // Fast BM25 scoring directly from memory-mapped postings & doc lengths
     for term in &query_terms {
-        if let Some(term_idx) = state.dictionary.get(term) {
-            if let Some(entry) = state.index.get_term_entry(term_idx as usize) {
-                let n_q = entry.doc_freq as f64;
-                let idf = bm25_idf(n, n_q);
-                let slice = state.index.get_postings_slice(&entry);
-                let iter = PostingsIterator::new(slice, entry.doc_freq as usize);
+        if let Some(term_idx) = state.dictionary.get(term)
+            && let Some(entry) = state.index.get_term_entry(term_idx as usize)
+        {
+            let n_q = entry.doc_freq as f64;
+            let idf = bm25_idf(n, n_q);
+            let slice = state.index.get_postings_slice(&entry);
+            let iter = PostingsIterator::new(slice, entry.doc_freq as usize);
 
-                for posting in iter {
-                    let doc_len = state.index.get_doc_length(posting.doc_id) as f64;
-                    let tf = posting.term_frequency as f64;
-                    let term_score = idf * bm25_tf_weight(tf, doc_len, state.index.avg_doc_length, k1, b);
+            for posting in iter {
+                let doc_len = state.index.get_doc_length(posting.doc_id) as f64;
+                let tf = posting.term_frequency as f64;
+                let term_score =
+                    idf * bm25_tf_weight(tf, doc_len, state.index.avg_doc_length, k1, b);
 
-                    *scores.entry(posting.doc_id).or_insert(0.0) += term_score;
-                }
+                *scores.entry(posting.doc_id).or_insert(0.0) += term_score;
             }
         }
     }
@@ -1070,9 +1231,18 @@ mod tests {
         assert_eq!(
             postings,
             vec![
-                Posting { doc_id: 10, term_frequency: 2 },
-                Posting { doc_id: 15, term_frequency: 1 },
-                Posting { doc_id: 40, term_frequency: 3 },
+                Posting {
+                    doc_id: 10,
+                    term_frequency: 2
+                },
+                Posting {
+                    doc_id: 15,
+                    term_frequency: 1
+                },
+                Posting {
+                    doc_id: 40,
+                    term_frequency: 3
+                },
             ]
         );
     }
@@ -1093,8 +1263,14 @@ mod tests {
         assert_eq!(
             postings,
             vec![
-                Posting { doc_id: 0, term_frequency: 1 },
-                Posting { doc_id: 3, term_frequency: 2 },
+                Posting {
+                    doc_id: 0,
+                    term_frequency: 1
+                },
+                Posting {
+                    doc_id: 3,
+                    term_frequency: 2
+                },
             ]
         );
     }
@@ -1161,9 +1337,9 @@ mod tests {
         let b = 0.75;
 
         let score = bm25_score(total_docs, doc_freq, tf, doc_len, avg_doc_len, k1, b);
-        let expected = bm25_idf(total_docs, doc_freq) * bm25_tf_weight(tf, doc_len, avg_doc_len, k1, b);
+        let expected =
+            bm25_idf(total_docs, doc_freq) * bm25_tf_weight(tf, doc_len, avg_doc_len, k1, b);
         assert_eq!(score, expected);
         assert!(score > 0.0);
     }
 }
-
