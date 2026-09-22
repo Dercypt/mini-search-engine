@@ -23,14 +23,14 @@ pub struct Document {
     pub links: Vec<String>,
 }
 
-fn hash_url(raw_url: &str) -> String {
+pub fn hash_url(raw_url: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(raw_url.as_bytes());
     let result = hasher.finalize();
     hex::encode(&result[..6])
 }
 
-fn normalize_url(raw_url: &str) -> Option<String> {
+pub fn normalize_url(raw_url: &str) -> Option<String> {
     let mut parsed = Url::parse(raw_url).ok()?;
     parsed.set_fragment(None);
     parsed.set_query(None);
@@ -322,3 +322,103 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_url_basic() {
+        let raw = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
+        assert_eq!(
+            normalize_url(raw),
+            Some("https://en.wikipedia.org/wiki/Rust_(programming_language)".to_string())
+        );
+    }
+
+    #[test]
+    fn test_normalize_url_removes_fragment() {
+        let raw = "https://en.wikipedia.org/wiki/Rust#History";
+        assert_eq!(
+            normalize_url(raw),
+            Some("https://en.wikipedia.org/wiki/Rust".to_string())
+        );
+
+        let raw_empty_frag = "https://en.wikipedia.org/wiki/Rust#";
+        assert_eq!(
+            normalize_url(raw_empty_frag),
+            Some("https://en.wikipedia.org/wiki/Rust".to_string())
+        );
+    }
+
+    #[test]
+    fn test_normalize_url_removes_query_parameters() {
+        let raw = "https://en.wikipedia.org/wiki/Rust?action=edit&section=1";
+        assert_eq!(
+            normalize_url(raw),
+            Some("https://en.wikipedia.org/wiki/Rust".to_string())
+        );
+
+        let raw_empty_query = "https://en.wikipedia.org/wiki/Rust?";
+        assert_eq!(
+            normalize_url(raw_empty_query),
+            Some("https://en.wikipedia.org/wiki/Rust".to_string())
+        );
+    }
+
+    #[test]
+    fn test_normalize_url_removes_both_query_and_fragment() {
+        let raw = "https://en.wikipedia.org/wiki/Search_engine?source=nav#Architecture";
+        assert_eq!(
+            normalize_url(raw),
+            Some("https://en.wikipedia.org/wiki/Search_engine".to_string())
+        );
+    }
+
+    #[test]
+    fn test_normalize_url_normalizes_scheme_and_host_casing() {
+        let raw = "HTTPS://EN.WIKIPEDIA.ORG/wiki/Rust";
+        assert_eq!(
+            normalize_url(raw),
+            Some("https://en.wikipedia.org/wiki/Rust".to_string())
+        );
+    }
+
+    #[test]
+    fn test_normalize_url_preserves_port_and_path() {
+        let raw = "http://localhost:8080/search?q=rust#top";
+        assert_eq!(
+            normalize_url(raw),
+            Some("http://localhost:8080/search".to_string())
+        );
+    }
+
+    #[test]
+    fn test_normalize_url_invalid_inputs() {
+        assert_eq!(normalize_url(""), None);
+        assert_eq!(normalize_url("not a url"), None);
+        assert_eq!(normalize_url("/relative/path/only"), None);
+        assert_eq!(normalize_url("http://"), None);
+        assert_eq!(normalize_url("://bad.url"), None);
+    }
+
+    #[test]
+    fn test_hash_url_properties() {
+        let url1 = "https://en.wikipedia.org/wiki/Rust";
+        let url2 = "https://en.wikipedia.org/wiki/Rust";
+        let url3 = "https://en.wikipedia.org/wiki/Search_engine";
+
+        let hash1 = hash_url(url1);
+        let hash2 = hash_url(url2);
+        let hash3 = hash_url(url3);
+
+        // Deterministic
+        assert_eq!(hash1, hash2);
+        // Distinct for distinct inputs
+        assert_ne!(hash1, hash3);
+        // 6 bytes in hex = 12 hex characters
+        assert_eq!(hash1.len(), 12);
+        assert!(hash1.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+}
+
