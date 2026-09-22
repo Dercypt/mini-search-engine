@@ -22,7 +22,7 @@ pub struct RawDocument {
     pub links: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct Posting {
     pub doc_id: u32,
     pub term_frequency: u32,
@@ -63,6 +63,9 @@ pub fn decode_vbyte(bytes: &[u8], offset: &mut usize) -> Option<u32> {
     let mut result = 0u32;
     let mut shift = 0;
     while *offset < bytes.len() {
+        if shift > 28 {
+            return None;
+        }
         let byte = bytes[*offset];
         *offset += 1;
         result |= ((byte & 0x7F) as u32) << shift;
@@ -70,9 +73,6 @@ pub fn decode_vbyte(bytes: &[u8], offset: &mut usize) -> Option<u32> {
             return Some(result);
         }
         shift += 7;
-        if shift > 35 {
-            return None;
-        }
     }
     None
 }
@@ -985,6 +985,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+// ============================================================================
+// BM25 Scoring Formulas
+// ============================================================================
+
+#[inline]
+pub fn bm25_idf(total_docs: f64, doc_freq: f64) -> f64 {
+    ((total_docs - doc_freq + 0.5) / (doc_freq + 0.5) + 1.0).ln()
+}
+
+#[inline]
+pub fn bm25_tf_weight(tf: f64, doc_len: f64, avg_doc_len: f64, k1: f64, b: f64) -> f64 {
+    if tf <= 0.0 {
+        return 0.0;
+    }
+    let num = tf * (k1 + 1.0);
+    let denom = tf + k1 * (1.0 - b + b * (doc_len / avg_doc_len));
+    num / denom
+}
+
+#[inline]
+pub fn bm25_score(
+    total_docs: f64,
+    doc_freq: f64,
+    tf: f64,
+    doc_len: f64,
+    avg_doc_len: f64,
+    k1: f64,
+    b: f64,
+) -> f64 {
+    bm25_idf(total_docs, doc_freq) * bm25_tf_weight(tf, doc_len, avg_doc_len, k1, b)
+}
+
 pub fn search_bm25_mmap<'a>(
     query: &str,
     index: &'a MmapIndex,
@@ -1006,16 +1038,14 @@ pub fn search_bm25_mmap<'a>(
         if let Some(term_idx) = dictionary.get(term) {
             if let Some(entry) = index.get_term_entry(term_idx as usize) {
                 let n_q = entry.doc_freq as f64;
-                let idf = ((n - n_q + 0.5) / (n_q + 0.5) + 1.0).ln();
+                let idf = bm25_idf(n, n_q);
                 let postings_slice = index.get_postings_slice(&entry);
                 let iter = PostingsIterator::new(postings_slice, entry.doc_freq as usize);
 
                 for posting in iter {
                     let doc_len = index.get_doc_length(posting.doc_id) as f64;
                     let tf = posting.term_frequency as f64;
-                    let num = tf * (k1 + 1.0);
-                    let denom = tf + k1 * (1.0 - b + b * (doc_len / index.avg_doc_length));
-                    let term_score = idf * (num / denom);
+                    let term_score = idf * bm25_tf_weight(tf, doc_len, index.avg_doc_length, k1, b);
 
                     *scores.entry(posting.doc_id).or_insert(0.0) += term_score;
                 }
@@ -1032,3 +1062,300 @@ pub fn search_bm25_mmap<'a>(
         .filter_map(|(doc_id, score)| index.get_doc_meta(doc_id).map(|meta| (meta, score)))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ------------------------------------------------------------------------
+    // VByte Encoding & Decoding Tests
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn test_vbyte_roundtrip_boundaries() {
+        let test_values = [
+            0u32,
+            1,
+            63,
+            127,        // 1 byte boundary (0x7F)
+            128,        // 2 byte boundary (0x80)
+            129,
+            255,
+            256,
+            16383,      // 2 byte max ((1 << 14) - 1)
+            16384,      // 3 byte boundary (1 << 14)
+            65535,
+            65536,
+            2097151,    // 3 byte max ((1 << 21) - 1)
+            2097152,    // 4 byte boundary (1 << 21)
+            268435455,  // 4 byte max ((1 << 28) - 1)
+            268435456,  // 5 byte boundary (1 << 28)
+            u32::MAX - 1,
+            u32::MAX,
+        ];
+
+        for &val in &test_values {
+            let mut buf = Vec::new();
+            encode_vbyte(val, &mut buf);
+
+            // Verify encoded length expectations
+            let expected_bytes = match val {
+                0..=0x7F => 1,
+                0x80..=0x3FFF => 2,
+                0x4000..=0x1F_FFFF => 3,
+                0x20_0000..=0xFFF_FFFF => 4,
+                _ => 5,
+            };
+            assert_eq!(
+                buf.len(),
+                expected_bytes,
+                "Unexpected byte count for value {}",
+                val
+            );
+
+            let mut offset = 0;
+            let decoded = decode_vbyte(&buf, &mut offset);
+            assert_eq!(decoded, Some(val), "Failed roundtrip for value {}", val);
+            assert_eq!(offset, buf.len(), "Did not consume full buffer for value {}", val);
+        }
+    }
+
+    #[test]
+    fn test_vbyte_roundtrip_sequential_stream() {
+        let values = [0u32, 1, 42, 127, 128, 500, 16384, 99999, 1_000_000, u32::MAX];
+        let mut buf = Vec::new();
+
+        for &v in &values {
+            encode_vbyte(v, &mut buf);
+        }
+
+        let mut offset = 0;
+        let mut decoded = Vec::new();
+        while let Some(val) = decode_vbyte(&buf, &mut offset) {
+            decoded.push(val);
+        }
+
+        assert_eq!(decoded, values);
+        assert_eq!(offset, buf.len());
+    }
+
+    #[test]
+    fn test_vbyte_decode_truncated_and_invalid() {
+        let mut offset = 0;
+        // Empty slice
+        assert_eq!(decode_vbyte(&[], &mut offset), None);
+
+        // Continuation bit set on single byte without terminating byte
+        offset = 0;
+        assert_eq!(decode_vbyte(&[0x80], &mut offset), None);
+
+        // Incomplete sequence
+        offset = 0;
+        assert_eq!(decode_vbyte(&[0x81, 0x82], &mut offset), None);
+
+        // Overflow: more than 5 bytes with continuation bit set (shift > 35)
+        offset = 0;
+        let malformed = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80];
+        assert_eq!(decode_vbyte(&malformed, &mut offset), None);
+    }
+
+    // ------------------------------------------------------------------------
+    // Delta Decoding & PostingsIterator Tests
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn test_delta_decoding_roundtrip() {
+        let original_postings = vec![
+            Posting { doc_id: 10, term_frequency: 1 },
+            Posting { doc_id: 15, term_frequency: 3 },
+            Posting { doc_id: 42, term_frequency: 2 },
+            Posting { doc_id: 100, term_frequency: 10 },
+            Posting { doc_id: 105, term_frequency: 1 },
+        ];
+
+        let mut buf = Vec::new();
+        encode_postings(&original_postings, &mut buf);
+
+        let iter = PostingsIterator::new(&buf, original_postings.len());
+        let decoded_postings: Vec<Posting> = iter.collect();
+
+        assert_eq!(decoded_postings, original_postings);
+    }
+
+    #[test]
+    fn test_delta_decoding_first_doc_zero() {
+        let original_postings = vec![
+            Posting { doc_id: 0, term_frequency: 5 },
+            Posting { doc_id: 1, term_frequency: 2 },
+            Posting { doc_id: 2, term_frequency: 1 },
+        ];
+
+        let mut buf = Vec::new();
+        encode_postings(&original_postings, &mut buf);
+
+        let iter = PostingsIterator::new(&buf, original_postings.len());
+        let decoded_postings: Vec<Posting> = iter.collect();
+
+        assert_eq!(decoded_postings, original_postings);
+    }
+
+    #[test]
+    fn test_delta_decoding_large_gaps() {
+        let original_postings = vec![
+            Posting { doc_id: 5, term_frequency: 1 },
+            Posting { doc_id: 1_000, term_frequency: 4 },
+            Posting { doc_id: 100_000, term_frequency: 2 },
+            Posting { doc_id: 5_000_000, term_frequency: 8 },
+        ];
+
+        let mut buf = Vec::new();
+        encode_postings(&original_postings, &mut buf);
+
+        let iter = PostingsIterator::new(&buf, original_postings.len());
+        let decoded: Vec<Posting> = iter.collect();
+
+        assert_eq!(decoded, original_postings);
+    }
+
+    #[test]
+    fn test_delta_decoding_empty_and_single_posting() {
+        // Empty postings
+        let empty_iter = PostingsIterator::new(&[], 0);
+        let empty_results: Vec<Posting> = empty_iter.collect();
+        assert!(empty_results.is_empty());
+
+        // Single posting
+        let single = vec![Posting { doc_id: 777, term_frequency: 13 }];
+        let mut buf = Vec::new();
+        encode_postings(&single, &mut buf);
+
+        let single_iter = PostingsIterator::new(&buf, single.len());
+        let single_results: Vec<Posting> = single_iter.collect();
+        assert_eq!(single_results, single);
+    }
+
+    #[test]
+    fn test_delta_decoding_direct_accumulator() {
+        // Test that deltas [10, 5, 20] decode into absolute doc_ids [10, 15, 35]
+        let mut buf = Vec::new();
+        encode_vbyte(10, &mut buf); // doc_id delta: 10
+        encode_vbyte(2, &mut buf);  // tf: 2
+        encode_vbyte(5, &mut buf);  // doc_id delta: 5 -> doc_id: 15
+        encode_vbyte(1, &mut buf);  // tf: 1
+        encode_vbyte(20, &mut buf); // doc_id delta: 20 -> doc_id: 35
+        encode_vbyte(4, &mut buf);  // tf: 4
+
+        let iter = PostingsIterator::new(&buf, 3);
+        let decoded: Vec<Posting> = iter.collect();
+
+        assert_eq!(
+            decoded,
+            vec![
+                Posting { doc_id: 10, term_frequency: 2 },
+                Posting { doc_id: 15, term_frequency: 1 },
+                Posting { doc_id: 35, term_frequency: 4 },
+            ]
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // BM25 Scoring Arithmetic Tests
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn test_bm25_idf_known_values() {
+        // N = 100, n_q = 1: idf = ln((100 - 1 + 0.5)/(1 + 0.5) + 1.0) = ln(99.5/1.5 + 1.0)
+        let idf_rare = bm25_idf(100.0, 1.0);
+        let expected_rare = (99.5 / 1.5 + 1.0_f64).ln();
+        assert!((idf_rare - expected_rare).abs() < 1e-10);
+        assert!((idf_rare - 4.209655).abs() < 1e-5);
+
+        // N = 100, n_q = 50: idf = ln((100 - 50 + 0.5)/(50 + 0.5) + 1.0) = ln(1.0 + 1.0) = ln(2.0)
+        let idf_half = bm25_idf(100.0, 50.0);
+        let expected_half = 2.0_f64.ln();
+        assert!((idf_half - expected_half).abs() < 1e-10);
+        assert!((idf_half - 0.693147).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_bm25_idf_monotonicity_and_positivity() {
+        let total_docs = 1000.0;
+        // As document frequency increases, IDF must strictly decrease
+        let idf_1 = bm25_idf(total_docs, 1.0);
+        let idf_10 = bm25_idf(total_docs, 10.0);
+        let idf_100 = bm25_idf(total_docs, 100.0);
+        let idf_1000 = bm25_idf(total_docs, 1000.0);
+
+        assert!(idf_1 > idf_10);
+        assert!(idf_10 > idf_100);
+        assert!(idf_100 > idf_1000);
+
+        // Even when a term appears in every document (n_q = total_docs), IDF is strictly positive
+        assert!(idf_1000 > 0.0);
+    }
+
+    #[test]
+    fn test_bm25_tf_weight_properties() {
+        let k1 = 1.5;
+        let b = 0.75;
+        let avg_doc_len = 100.0;
+
+        // When tf == 0, weight must be 0
+        assert_eq!(bm25_tf_weight(0.0, avg_doc_len, avg_doc_len, k1, b), 0.0);
+
+        // When doc_len == avg_doc_len and tf == 1.0:
+        // num = 1.0 * (k1 + 1.0) = 2.5
+        // denom = 1.0 + k1 * (1 - b + b * 1) = 1.0 + 1.5 = 2.5
+        // weight is exactly 1.0
+        let weight_standard = bm25_tf_weight(1.0, avg_doc_len, avg_doc_len, k1, b);
+        assert!((weight_standard - 1.0).abs() < 1e-10);
+
+        // Monotonic increase with term frequency:
+        let weight_tf1 = bm25_tf_weight(1.0, avg_doc_len, avg_doc_len, k1, b);
+        let weight_tf2 = bm25_tf_weight(2.0, avg_doc_len, avg_doc_len, k1, b);
+        let weight_tf5 = bm25_tf_weight(5.0, avg_doc_len, avg_doc_len, k1, b);
+        let weight_tf100 = bm25_tf_weight(100.0, avg_doc_len, avg_doc_len, k1, b);
+
+        assert!(weight_tf1 < weight_tf2);
+        assert!(weight_tf2 < weight_tf5);
+        assert!(weight_tf5 < weight_tf100);
+
+        // Upper bounded by (k1 + 1.0) = 2.5
+        assert!(weight_tf100 < 2.5);
+    }
+
+    #[test]
+    fn test_bm25_document_length_penalty() {
+        let k1 = 1.5;
+        let b = 0.75;
+        let avg_doc_len = 100.0;
+        let tf = 2.0;
+
+        let short_doc_weight = bm25_tf_weight(tf, 50.0, avg_doc_len, k1, b);
+        let normal_doc_weight = bm25_tf_weight(tf, 100.0, avg_doc_len, k1, b);
+        let long_doc_weight = bm25_tf_weight(tf, 200.0, avg_doc_len, k1, b);
+
+        // Shorter documents receive higher term weight than longer documents with the same TF
+        assert!(short_doc_weight > normal_doc_weight);
+        assert!(normal_doc_weight > long_doc_weight);
+    }
+
+    #[test]
+    fn test_bm25_score_computation() {
+        let total_docs = 500.0;
+        let doc_freq = 10.0;
+        let tf = 3.0;
+        let doc_len = 120.0;
+        let avg_doc_len = 100.0;
+        let k1 = 1.5;
+        let b = 0.75;
+
+        let idf = bm25_idf(total_docs, doc_freq);
+        let tf_weight = bm25_tf_weight(tf, doc_len, avg_doc_len, k1, b);
+        let score = bm25_score(total_docs, doc_freq, tf, doc_len, avg_doc_len, k1, b);
+
+        assert_eq!(score, idf * tf_weight);
+        assert!(score > 0.0);
+    }
+}
+
