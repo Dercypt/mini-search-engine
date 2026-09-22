@@ -25,7 +25,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 // VByte Compression & Postings Iterator
 // ============================================================================
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Posting {
     pub doc_id: u32,
     pub term_frequency: u32,
@@ -36,6 +36,9 @@ pub fn decode_vbyte(bytes: &[u8], offset: &mut usize) -> Option<u32> {
     let mut result = 0u32;
     let mut shift = 0;
     while *offset < bytes.len() {
+        if shift > 28 {
+            return None;
+        }
         let byte = bytes[*offset];
         *offset += 1;
         result |= ((byte & 0x7F) as u32) << shift;
@@ -43,9 +46,6 @@ pub fn decode_vbyte(bytes: &[u8], offset: &mut usize) -> Option<u32> {
             return Some(result);
         }
         shift += 7;
-        if shift > 35 {
-            return None;
-        }
     }
     None
 }
@@ -826,6 +826,38 @@ async fn suggest_handler(
     Json(suggestions)
 }
 
+// ============================================================================
+// BM25 Scoring Formulas
+// ============================================================================
+
+#[inline]
+pub fn bm25_idf(total_docs: f64, doc_freq: f64) -> f64 {
+    ((total_docs - doc_freq + 0.5) / (doc_freq + 0.5) + 1.0).ln()
+}
+
+#[inline]
+pub fn bm25_tf_weight(tf: f64, doc_len: f64, avg_doc_len: f64, k1: f64, b: f64) -> f64 {
+    if tf <= 0.0 {
+        return 0.0;
+    }
+    let num = tf * (k1 + 1.0);
+    let denom = tf + k1 * (1.0 - b + b * (doc_len / avg_doc_len));
+    num / denom
+}
+
+#[inline]
+pub fn bm25_score(
+    total_docs: f64,
+    doc_freq: f64,
+    tf: f64,
+    doc_len: f64,
+    avg_doc_len: f64,
+    k1: f64,
+    b: f64,
+) -> f64 {
+    bm25_idf(total_docs, doc_freq) * bm25_tf_weight(tf, doc_len, avg_doc_len, k1, b)
+}
+
 async fn search_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchParams>,
@@ -879,16 +911,14 @@ async fn search_handler(
         if let Some(term_idx) = state.dictionary.get(term) {
             if let Some(entry) = state.index.get_term_entry(term_idx as usize) {
                 let n_q = entry.doc_freq as f64;
-                let idf = ((n - n_q + 0.5) / (n_q + 0.5) + 1.0).ln();
+                let idf = bm25_idf(n, n_q);
                 let slice = state.index.get_postings_slice(&entry);
                 let iter = PostingsIterator::new(slice, entry.doc_freq as usize);
 
                 for posting in iter {
                     let doc_len = state.index.get_doc_length(posting.doc_id) as f64;
                     let tf = posting.term_frequency as f64;
-                    let num = tf * (k1 + 1.0);
-                    let denom = tf + k1 * (1.0 - b + b * (doc_len / state.index.avg_doc_length));
-                    let term_score = idf * (num / denom);
+                    let term_score = idf * bm25_tf_weight(tf, doc_len, state.index.avg_doc_length, k1, b);
 
                     *scores.entry(posting.doc_id).or_insert(0.0) += term_score;
                 }
@@ -968,3 +998,172 @@ async fn search_handler(
         }),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper function for test encoding
+    fn encode_vbyte(mut val: u32, buf: &mut Vec<u8>) {
+        while val >= 0x80 {
+            buf.push(((val & 0x7F) as u8) | 0x80);
+            val >>= 7;
+        }
+        buf.push((val & 0x7F) as u8);
+    }
+
+    // ------------------------------------------------------------------------
+    // VByte Decoding Tests
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn test_decode_vbyte_values() {
+        let test_values = [0u32, 1, 127, 128, 16383, 16384, 65535, 1_000_000, u32::MAX];
+        let mut buf = Vec::new();
+        for &val in &test_values {
+            encode_vbyte(val, &mut buf);
+        }
+
+        let mut offset = 0;
+        let mut decoded = Vec::new();
+        while let Some(v) = decode_vbyte(&buf, &mut offset) {
+            decoded.push(v);
+        }
+
+        assert_eq!(decoded, test_values);
+        assert_eq!(offset, buf.len());
+    }
+
+    #[test]
+    fn test_decode_vbyte_truncated_and_overflow() {
+        let mut offset = 0;
+        assert_eq!(decode_vbyte(&[], &mut offset), None);
+
+        offset = 0;
+        assert_eq!(decode_vbyte(&[0x80], &mut offset), None);
+
+        offset = 0;
+        let malformed = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80];
+        assert_eq!(decode_vbyte(&malformed, &mut offset), None);
+    }
+
+    // ------------------------------------------------------------------------
+    // Delta Decoding via PostingsIterator Tests
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn test_postings_iterator_delta_decoding() {
+        let mut buf = Vec::new();
+        // doc 10, tf 2
+        encode_vbyte(10, &mut buf);
+        encode_vbyte(2, &mut buf);
+        // doc 15 (delta 5), tf 1
+        encode_vbyte(5, &mut buf);
+        encode_vbyte(1, &mut buf);
+        // doc 40 (delta 25), tf 3
+        encode_vbyte(25, &mut buf);
+        encode_vbyte(3, &mut buf);
+
+        let iter = PostingsIterator::new(&buf, 3);
+        let postings: Vec<Posting> = iter.collect();
+
+        assert_eq!(
+            postings,
+            vec![
+                Posting { doc_id: 10, term_frequency: 2 },
+                Posting { doc_id: 15, term_frequency: 1 },
+                Posting { doc_id: 40, term_frequency: 3 },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_postings_iterator_first_doc_zero() {
+        let mut buf = Vec::new();
+        // doc 0, tf 1
+        encode_vbyte(0, &mut buf);
+        encode_vbyte(1, &mut buf);
+        // doc 3 (delta 3), tf 2
+        encode_vbyte(3, &mut buf);
+        encode_vbyte(2, &mut buf);
+
+        let iter = PostingsIterator::new(&buf, 2);
+        let postings: Vec<Posting> = iter.collect();
+
+        assert_eq!(
+            postings,
+            vec![
+                Posting { doc_id: 0, term_frequency: 1 },
+                Posting { doc_id: 3, term_frequency: 2 },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_postings_iterator_empty() {
+        let iter = PostingsIterator::new(&[], 0);
+        let results: Vec<Posting> = iter.collect();
+        assert!(results.is_empty());
+    }
+
+    // ------------------------------------------------------------------------
+    // BM25 Scoring Arithmetic Tests
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn test_bm25_idf_known_values() {
+        let idf_rare = bm25_idf(100.0, 1.0);
+        let expected_rare = (99.5 / 1.5 + 1.0_f64).ln();
+        assert!((idf_rare - expected_rare).abs() < 1e-10);
+        assert!((idf_rare - 4.209655).abs() < 1e-5);
+
+        let idf_half = bm25_idf(100.0, 50.0);
+        assert!((idf_half - 2.0_f64.ln()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_bm25_tf_weight_properties() {
+        let k1 = 1.5;
+        let b = 0.75;
+        let avg_doc_len = 80.0;
+
+        assert_eq!(bm25_tf_weight(0.0, avg_doc_len, avg_doc_len, k1, b), 0.0);
+
+        let weight_1 = bm25_tf_weight(1.0, avg_doc_len, avg_doc_len, k1, b);
+        assert!((weight_1 - 1.0).abs() < 1e-10);
+
+        let weight_2 = bm25_tf_weight(2.0, avg_doc_len, avg_doc_len, k1, b);
+        let weight_5 = bm25_tf_weight(5.0, avg_doc_len, avg_doc_len, k1, b);
+        assert!(weight_1 < weight_2);
+        assert!(weight_2 < weight_5);
+    }
+
+    #[test]
+    fn test_bm25_document_length_penalty() {
+        let k1 = 1.5;
+        let b = 0.75;
+        let avg_doc_len = 100.0;
+        let tf = 2.0;
+
+        let short_doc = bm25_tf_weight(tf, 40.0, avg_doc_len, k1, b);
+        let long_doc = bm25_tf_weight(tf, 250.0, avg_doc_len, k1, b);
+        assert!(short_doc > long_doc);
+    }
+
+    #[test]
+    fn test_bm25_score_computation() {
+        let total_docs = 1000.0;
+        let doc_freq = 5.0;
+        let tf = 2.0;
+        let doc_len = 100.0;
+        let avg_doc_len = 100.0;
+        let k1 = 1.5;
+        let b = 0.75;
+
+        let score = bm25_score(total_docs, doc_freq, tf, doc_len, avg_doc_len, k1, b);
+        let expected = bm25_idf(total_docs, doc_freq) * bm25_tf_weight(tf, doc_len, avg_doc_len, k1, b);
+        assert_eq!(score, expected);
+        assert!(score > 0.0);
+    }
+}
+
