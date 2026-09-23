@@ -29,6 +29,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 pub struct Posting {
     pub doc_id: u32,
     pub term_frequency: u32,
+    pub positions: Vec<u32>,
 }
 
 #[inline]
@@ -86,10 +87,23 @@ impl<'a> Iterator for PostingsIterator<'a> {
         self.last_doc_id = doc_id;
         self.index += 1;
         self.remaining -= 1;
-        let term_frequency = decode_vbyte(self.slice, &mut self.offset).unwrap_or(1);
+        let term_frequency = decode_vbyte(self.slice, &mut self.offset).unwrap_or(0);
+        let mut positions = Vec::with_capacity(term_frequency as usize);
+        let mut last_pos = 0u32;
+        for j in 0..term_frequency {
+            let pos_delta = decode_vbyte(self.slice, &mut self.offset)?;
+            let pos = if j == 0 {
+                pos_delta
+            } else {
+                last_pos + pos_delta
+            };
+            last_pos = pos;
+            positions.push(pos);
+        }
         Some(Posting {
             doc_id,
             term_frequency,
+            positions,
         })
     }
 }
@@ -1095,6 +1109,105 @@ pub fn bm25_score(
     bm25_idf(total_docs, doc_freq) * bm25_tf_weight(tf, doc_len, avg_doc_len, k1, b)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedQuery {
+    pub phrases: Vec<Vec<String>>,
+    pub unquoted_terms: Vec<String>,
+}
+
+impl ParsedQuery {
+    pub fn all_terms(&self) -> Vec<String> {
+        let mut terms = Vec::new();
+        for phrase in &self.phrases {
+            for term in phrase {
+                if !terms.contains(term) {
+                    terms.push(term.clone());
+                }
+            }
+        }
+        for term in &self.unquoted_terms {
+            if !terms.contains(term) {
+                terms.push(term.clone());
+            }
+        }
+        terms
+    }
+}
+
+pub fn parse_query(query: &str, pipeline: &TokenizerPipeline) -> ParsedQuery {
+    let mut phrases = Vec::new();
+    let mut unquoted_text = String::new();
+
+    let mut in_quote = false;
+    let mut current_phrase = String::new();
+
+    for ch in query.chars() {
+        if ch == '"' {
+            if in_quote {
+                let tokens = pipeline.tokenize(&current_phrase);
+                if !tokens.is_empty() {
+                    phrases.push(tokens);
+                }
+                current_phrase.clear();
+                in_quote = false;
+            } else {
+                in_quote = true;
+            }
+        } else if in_quote {
+            current_phrase.push(ch);
+        } else {
+            unquoted_text.push(ch);
+        }
+    }
+
+    if in_quote && !current_phrase.is_empty() {
+        let tokens = pipeline.tokenize(&current_phrase);
+        if !tokens.is_empty() {
+            phrases.push(tokens);
+        }
+    }
+
+    let unquoted_terms = pipeline.tokenize(&unquoted_text);
+
+    ParsedQuery {
+        phrases,
+        unquoted_terms,
+    }
+}
+
+pub fn phrase_matches(positions_list: &[&[u32]]) -> bool {
+    if positions_list.is_empty() {
+        return true;
+    }
+    if positions_list.len() == 1 {
+        return !positions_list[0].is_empty();
+    }
+    let mut current_starts: Vec<u32> = positions_list[0].to_vec();
+    for (offset, next_positions) in positions_list.iter().skip(1).enumerate() {
+        let expected_offset = (offset + 1) as u32;
+        let mut next_starts = Vec::new();
+        let mut i = 0;
+        let mut j = 0;
+        while i < current_starts.len() && j < next_positions.len() {
+            let target = current_starts[i].saturating_add(expected_offset);
+            if next_positions[j] == target {
+                next_starts.push(current_starts[i]);
+                i += 1;
+                j += 1;
+            } else if next_positions[j] < target {
+                j += 1;
+            } else {
+                i += 1;
+            }
+        }
+        current_starts = next_starts;
+        if current_starts.is_empty() {
+            return false;
+        }
+    }
+    !current_starts.is_empty()
+}
+
 async fn search_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchParams>,
@@ -1121,8 +1234,9 @@ async fn search_handler(
 
     let start_time = Instant::now();
 
-    let query_terms = state.pipeline.tokenize(&query_str);
-    if query_terms.is_empty() {
+    let parsed_query = parse_query(&query_str, &state.pipeline);
+    let all_terms = parsed_query.all_terms();
+    if all_terms.is_empty() {
         return (
             StatusCode::OK,
             Json(SearchResponse {
@@ -1138,13 +1252,78 @@ async fn search_handler(
         );
     }
 
+    // Filter documents by phrase requirements if any phrases exist
+    let mut phrase_matching_docs: Option<HashSet<u32>> = None;
+
+    for phrase in &parsed_query.phrases {
+        if phrase.is_empty() {
+            continue;
+        }
+        let mut term_postings = Vec::with_capacity(phrase.len());
+        let mut all_found = true;
+        for term in phrase {
+            if let Some(term_idx) = state.dictionary.get(term)
+                && let Some(entry) = state.index.get_term_entry(term_idx as usize)
+            {
+                let slice = state.index.get_postings_slice(&entry);
+                let iter = PostingsIterator::new(slice, entry.doc_freq as usize);
+                let map: HashMap<u32, Vec<u32>> = iter.map(|p| (p.doc_id, p.positions)).collect();
+                term_postings.push(map);
+            } else {
+                all_found = false;
+                break;
+            }
+        }
+
+        if !all_found {
+            phrase_matching_docs = Some(HashSet::new());
+            break;
+        }
+
+        let mut matching_in_phrase = HashSet::new();
+        if let Some(first_map) = term_postings.first() {
+            for (&doc_id, first_positions) in first_map {
+                let mut doc_positions: Vec<&[u32]> = Vec::with_capacity(term_postings.len());
+                doc_positions.push(first_positions.as_slice());
+                let mut in_all = true;
+                for next_map in &term_postings[1..] {
+                    if let Some(pos) = next_map.get(&doc_id) {
+                        doc_positions.push(pos.as_slice());
+                    } else {
+                        in_all = false;
+                        break;
+                    }
+                }
+                if in_all && phrase_matches(&doc_positions) {
+                    matching_in_phrase.insert(doc_id);
+                }
+            }
+        }
+
+        phrase_matching_docs = match phrase_matching_docs {
+            None => Some(matching_in_phrase),
+            Some(existing) => Some(
+                existing
+                    .intersection(&matching_in_phrase)
+                    .copied()
+                    .collect(),
+            ),
+        };
+
+        if let Some(ref docs) = phrase_matching_docs
+            && docs.is_empty()
+        {
+            break;
+        }
+    }
+
     let k1 = 1.5;
     let b = 0.75;
     let n = state.index.total_docs as f64;
     let mut scores: HashMap<u32, f64> = HashMap::new();
 
     // Fast BM25 scoring directly from memory-mapped postings & doc lengths
-    for term in &query_terms {
+    for term in &all_terms {
         if let Some(term_idx) = state.dictionary.get(term)
             && let Some(entry) = state.index.get_term_entry(term_idx as usize)
         {
@@ -1154,6 +1333,12 @@ async fn search_handler(
             let iter = PostingsIterator::new(slice, entry.doc_freq as usize);
 
             for posting in iter {
+                if let Some(ref allowed_docs) = phrase_matching_docs
+                    && !allowed_docs.contains(&posting.doc_id)
+                {
+                    continue;
+                }
+
                 let doc_len = state.index.get_doc_length(posting.doc_id) as f64;
                 let tf = posting.term_frequency as f64;
                 let term_score =
@@ -1184,7 +1369,7 @@ async fn search_handler(
     // Fuzzy matching fallback if zero hits were scored
     let did_you_mean = if total_hits == 0 {
         let mut suggestions = Vec::new();
-        for term in &query_terms {
+        for term in &all_terms {
             let fuzzy_candidates = state.dictionary.fuzzy_terms(term, 2, 3);
             suggestions.extend(fuzzy_candidates);
         }
@@ -1207,6 +1392,7 @@ async fn search_handler(
 
     let mut hits = Vec::with_capacity(paged_results.len());
     let raw_tokens: Vec<String> = query_str
+        .replace('"', " ")
         .split_whitespace()
         .map(|w| w.to_lowercase())
         .collect();
@@ -1304,15 +1490,23 @@ mod tests {
     #[test]
     fn test_postings_iterator_delta_decoding() {
         let mut buf = Vec::new();
-        // doc 10, tf 2
+        // doc 10, tf 2, pos: [4, 9] (pos_delta: 4, 5)
         encode_vbyte(10, &mut buf);
         encode_vbyte(2, &mut buf);
-        // doc 15 (delta 5), tf 1
+        encode_vbyte(4, &mut buf);
+        encode_vbyte(5, &mut buf);
+
+        // doc 15 (delta 5), tf 1, pos: [12] (pos_delta: 12)
         encode_vbyte(5, &mut buf);
         encode_vbyte(1, &mut buf);
-        // doc 40 (delta 25), tf 3
+        encode_vbyte(12, &mut buf);
+
+        // doc 40 (delta 25), tf 3, pos: [0, 6, 20] (pos_delta: 0, 6, 14)
         encode_vbyte(25, &mut buf);
         encode_vbyte(3, &mut buf);
+        encode_vbyte(0, &mut buf);
+        encode_vbyte(6, &mut buf);
+        encode_vbyte(14, &mut buf);
 
         let iter = PostingsIterator::new(&buf, 3);
         let postings: Vec<Posting> = iter.collect();
@@ -1322,15 +1516,18 @@ mod tests {
             vec![
                 Posting {
                     doc_id: 10,
-                    term_frequency: 2
+                    term_frequency: 2,
+                    positions: vec![4, 9],
                 },
                 Posting {
                     doc_id: 15,
-                    term_frequency: 1
+                    term_frequency: 1,
+                    positions: vec![12],
                 },
                 Posting {
                     doc_id: 40,
-                    term_frequency: 3
+                    term_frequency: 3,
+                    positions: vec![0, 6, 20],
                 },
             ]
         );
@@ -1339,12 +1536,16 @@ mod tests {
     #[test]
     fn test_postings_iterator_first_doc_zero() {
         let mut buf = Vec::new();
-        // doc 0, tf 1
+        // doc 0, tf 1, pos: [0]
         encode_vbyte(0, &mut buf);
         encode_vbyte(1, &mut buf);
-        // doc 3 (delta 3), tf 2
+        encode_vbyte(0, &mut buf);
+
+        // doc 3 (delta 3), tf 2, pos: [5, 10] (pos_delta: 5, 5)
         encode_vbyte(3, &mut buf);
         encode_vbyte(2, &mut buf);
+        encode_vbyte(5, &mut buf);
+        encode_vbyte(5, &mut buf);
 
         let iter = PostingsIterator::new(&buf, 2);
         let postings: Vec<Posting> = iter.collect();
@@ -1354,11 +1555,13 @@ mod tests {
             vec![
                 Posting {
                     doc_id: 0,
-                    term_frequency: 1
+                    term_frequency: 1,
+                    positions: vec![0],
                 },
                 Posting {
                     doc_id: 3,
-                    term_frequency: 2
+                    term_frequency: 2,
+                    positions: vec![5, 10],
                 },
             ]
         );
@@ -1369,6 +1572,62 @@ mod tests {
         let iter = PostingsIterator::new(&[], 0);
         let results: Vec<Posting> = iter.collect();
         assert!(results.is_empty());
+    }
+
+    // ------------------------------------------------------------------------
+    // Phrase Matching & Query Parsing Tests
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn test_phrase_matches_search_api() {
+        // Single term match
+        assert!(phrase_matches(&[&[1, 5, 10]]));
+        assert!(!phrase_matches(&[&[]]));
+
+        // Consecutive phrase match
+        let pos1 = [2, 4, 10];
+        let pos2 = [5, 20];
+        assert!(phrase_matches(&[&pos1, &pos2]));
+
+        // Non-consecutive positions
+        let pos1_fail = [2, 4, 10];
+        let pos2_fail = [7, 20];
+        assert!(!phrase_matches(&[&pos1_fail, &pos2_fail]));
+
+        // Three terms consecutive match
+        let p1 = [10, 50];
+        let p2 = [11, 60];
+        let p3 = [12, 70];
+        assert!(phrase_matches(&[&p1, &p2, &p3]));
+
+        // Three terms where third term misses
+        let p3_fail = [14, 70];
+        assert!(!phrase_matches(&[&p1, &p2, &p3_fail]));
+    }
+
+    #[test]
+    fn test_parse_query_search_api() {
+        let pipeline = TokenizerPipeline::new();
+
+        // Plain unquoted
+        let q1 = parse_query("distributed systems", &pipeline);
+        assert!(q1.phrases.is_empty());
+        assert_eq!(q1.unquoted_terms, vec!["distribut", "system"]);
+
+        // Pure quoted
+        let q2 = parse_query("\"distributed systems\"", &pipeline);
+        assert_eq!(q2.phrases, vec![vec!["distribut", "system"]]);
+        assert!(q2.unquoted_terms.is_empty());
+
+        // Mixed quoted
+        let q3 = parse_query("rust \"distributed systems\" query", &pipeline);
+        assert_eq!(q3.phrases, vec![vec!["distribut", "system"]]);
+        assert_eq!(q3.unquoted_terms, vec!["rust", "queri"]);
+
+        // Unclosed quote
+        let q4 = parse_query("\"distributed systems", &pipeline);
+        assert_eq!(q4.phrases, vec![vec!["distribut", "system"]]);
+        assert!(q4.unquoted_terms.is_empty());
     }
 
     // ------------------------------------------------------------------------
@@ -1457,5 +1716,34 @@ mod tests {
 
         assert!((final_score(bm25, pr, 1.0, epsilon) - bm25).abs() < 1e-10);
         assert!((final_score(bm25, pr, 0.0, epsilon) - (pr + epsilon).ln()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_quoted_query_phrase_filtering() {
+        let pipeline = TokenizerPipeline::new();
+
+        let doc1_distribut = vec![2];
+        let doc1_system = vec![3]; // consecutive: pos 2 + 1 = 3 -> MATCH
+
+        let doc2_distribut = vec![2];
+        let doc2_system = vec![10]; // non-consecutive -> NO MATCH
+
+        let doc3_distribut = vec![15];
+        let doc3_system = vec![14]; // reversed -> NO MATCH for "distributed systems", MATCH for "systems distributed"
+
+        // Phrase "distributed systems"
+        assert!(phrase_matches(&[&doc1_distribut, &doc1_system]));
+        assert!(!phrase_matches(&[&doc2_distribut, &doc2_system]));
+        assert!(!phrase_matches(&[&doc3_distribut, &doc3_system]));
+
+        // Phrase "systems distributed"
+        assert!(!phrase_matches(&[&doc1_system, &doc1_distribut]));
+        assert!(!phrase_matches(&[&doc2_system, &doc2_distribut]));
+        assert!(phrase_matches(&[&doc3_system, &doc3_distribut]));
+
+        // Check query parsing
+        let parsed = parse_query("\"distributed systems\"", &pipeline);
+        assert_eq!(parsed.phrases, vec![vec!["distribut", "system"]]);
+        assert_eq!(parsed.all_terms(), vec!["distribut", "system"]);
     }
 }
