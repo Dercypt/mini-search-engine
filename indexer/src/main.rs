@@ -3,7 +3,7 @@ use fst::{Automaton, IntoStreamer, Map, MapBuilder, Streamer};
 use regex::Regex;
 use rust_stemmers::{Algorithm, Stemmer};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -163,6 +163,109 @@ impl<'a> Iterator for PostingsIterator<'a> {
             term_frequency,
             positions,
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScoredDoc {
+    pub doc_id: u32,
+    pub score: f64,
+}
+
+impl Eq for ScoredDoc {}
+
+impl PartialOrd for ScoredDoc {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ScoredDoc {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Min-heap ordering: reverse score so that smallest score has highest priority (popped first)
+        other
+            .score
+            .partial_cmp(&self.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| self.doc_id.cmp(&other.doc_id))
+    }
+}
+
+pub struct WandPostingCursor<'a> {
+    slice: &'a [u8],
+    offset: usize,
+    last_doc_id: u32,
+    remaining: usize,
+    index: usize,
+    pub current_doc_id: u32,
+    pub current_tf: u32,
+    pub idf: f64,
+    pub max_score: f64,
+    pub has_more: bool,
+}
+
+impl<'a> WandPostingCursor<'a> {
+    pub fn new(slice: &'a [u8], doc_freq: usize, idf: f64, max_score: f64) -> Self {
+        let mut cursor = Self {
+            slice,
+            offset: 0,
+            last_doc_id: 0,
+            remaining: doc_freq,
+            index: 0,
+            current_doc_id: 0,
+            current_tf: 0,
+            idf,
+            max_score,
+            has_more: false,
+        };
+        cursor.read_next();
+        cursor
+    }
+
+    #[inline]
+    pub fn read_next(&mut self) -> bool {
+        if self.remaining == 0 {
+            self.has_more = false;
+            return false;
+        }
+        let Some(delta) = decode_vbyte(self.slice, &mut self.offset) else {
+            self.has_more = false;
+            return false;
+        };
+        let doc_id = if self.index == 0 {
+            delta
+        } else {
+            self.last_doc_id + delta
+        };
+        self.last_doc_id = doc_id;
+        self.index += 1;
+        self.remaining -= 1;
+        self.current_doc_id = doc_id;
+
+        let tf = decode_vbyte(self.slice, &mut self.offset).unwrap_or(0);
+        self.current_tf = tf;
+
+        // Skip position deltas for this posting: tf VByte numbers
+        for _ in 0..tf {
+            while self.offset < self.slice.len() {
+                let byte = self.slice[self.offset];
+                self.offset += 1;
+                if (byte & 0x80) == 0 {
+                    break;
+                }
+            }
+        }
+
+        self.has_more = true;
+        true
+    }
+
+    #[inline]
+    pub fn advance_to(&mut self, target_doc_id: u32) -> bool {
+        while self.has_more && self.current_doc_id < target_doc_id {
+            self.read_next();
+        }
+        self.has_more
     }
 }
 
@@ -1562,6 +1665,9 @@ pub fn search_combined_mmap<'a>(
     epsilon: f64,
     top_k: usize,
 ) -> Vec<(DocMetaRef<'a>, f64)> {
+    if top_k == 0 {
+        return Vec::new();
+    }
     let k1 = 1.5;
     let b = 0.75;
     let parsed_query = parse_query(query, pipeline);
@@ -1634,49 +1740,130 @@ pub fn search_combined_mmap<'a>(
         }
     }
 
-    let mut scores: HashMap<u32, f64> = HashMap::new();
     let n = index.total_docs as f64;
+    let pr_max = if alpha < 1.0 {
+        (1.0 - alpha) * (1.0 + epsilon).ln()
+    } else {
+        0.0
+    };
 
+    // Initialize WAND cursors for all query terms
+    let mut cursors: Vec<WandPostingCursor<'a>> = Vec::with_capacity(all_terms.len());
     for term in &all_terms {
         if let Some(term_idx) = dictionary.get(term)
             && let Some(entry) = index.get_term_entry(term_idx as usize)
         {
+            if entry.doc_freq == 0 {
+                continue;
+            }
             let n_q = entry.doc_freq as f64;
             let idf = bm25_idf(n, n_q);
-            let postings_slice = index.get_postings_slice(&entry);
-            let iter = PostingsIterator::new(postings_slice, entry.doc_freq as usize);
-
-            for posting in iter {
-                if let Some(ref allowed_docs) = phrase_matching_docs
-                    && !allowed_docs.contains(&posting.doc_id)
-                {
-                    continue;
-                }
-
-                let doc_len = index.get_doc_length(posting.doc_id) as f64;
-                let tf = posting.term_frequency as f64;
-                let term_score = idf * bm25_tf_weight(tf, doc_len, index.avg_doc_length, k1, b);
-
-                *scores.entry(posting.doc_id).or_insert(0.0) += term_score;
+            // Universal upper bound on term score contribution
+            let max_score = alpha * idf * (k1 + 1.0);
+            let slice = index.get_postings_slice(&entry);
+            let cursor = WandPostingCursor::new(slice, entry.doc_freq as usize, idf, max_score);
+            if cursor.has_more {
+                cursors.push(cursor);
             }
         }
     }
 
-    let mut ranked: Vec<(u32, f64)> = scores
-        .into_iter()
-        .map(|(doc_id, bm25)| {
-            let pr = index.get_pagerank(doc_id);
-            let combined = final_score(bm25, pr, alpha, epsilon);
-            (doc_id, combined)
-        })
-        .collect();
+    if cursors.is_empty() {
+        return Vec::new();
+    }
 
-    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    ranked.truncate(top_k);
+    let mut heap: BinaryHeap<ScoredDoc> = BinaryHeap::with_capacity(top_k + 1);
+    let mut threshold = f64::NEG_INFINITY;
+
+    while !cursors.is_empty() {
+        // Sort cursors by current_doc_id
+        cursors.sort_unstable_by_key(|c| c.current_doc_id);
+
+        // Find pivot term where accumulated upper bound > threshold - pr_max
+        let score_limit = threshold - pr_max;
+        let mut accum = 0.0;
+        let mut pivot_idx = None;
+
+        for (i, c) in cursors.iter().enumerate() {
+            accum += c.max_score;
+            if accum > score_limit {
+                pivot_idx = Some(i);
+                break;
+            }
+        }
+
+        let Some(p) = pivot_idx else {
+            // No remaining document can beat the current threshold
+            break;
+        };
+
+        let pivot_doc = cursors[p].current_doc_id;
+
+        if cursors[0].current_doc_id == pivot_doc {
+            let target_doc = pivot_doc;
+            let is_allowed = phrase_matching_docs
+                .as_ref()
+                .is_none_or(|docs| docs.contains(&target_doc));
+
+            if is_allowed {
+                let doc_len = index.get_doc_length(target_doc) as f64;
+                let mut bm25_total = 0.0;
+
+                for c in cursors.iter_mut() {
+                    if c.current_doc_id == target_doc {
+                        let tf = c.current_tf as f64;
+                        let term_score =
+                            c.idf * bm25_tf_weight(tf, doc_len, index.avg_doc_length, k1, b);
+                        bm25_total += term_score;
+                        c.read_next();
+                    }
+                }
+
+                let pr = index.get_pagerank(target_doc);
+                let score = final_score(bm25_total, pr, alpha, epsilon);
+
+                if heap.len() < top_k {
+                    heap.push(ScoredDoc {
+                        doc_id: target_doc,
+                        score,
+                    });
+                    if heap.len() == top_k {
+                        threshold = heap.peek().unwrap().score;
+                    }
+                } else if score > threshold {
+                    heap.pop();
+                    heap.push(ScoredDoc {
+                        doc_id: target_doc,
+                        score,
+                    });
+                    threshold = heap.peek().unwrap().score;
+                }
+            } else {
+                for c in cursors.iter_mut() {
+                    if c.current_doc_id == target_doc {
+                        c.read_next();
+                    }
+                }
+            }
+        } else {
+            // Skip uncompetitive documents: advance cursor 0 to at least pivot_doc
+            cursors[0].advance_to(pivot_doc);
+        }
+
+        cursors.retain(|c| c.has_more);
+    }
+
+    let mut ranked: Vec<ScoredDoc> = heap.into_vec();
+    ranked.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.doc_id.cmp(&b.doc_id))
+    });
 
     ranked
         .into_iter()
-        .filter_map(|(doc_id, score)| index.get_doc_meta(doc_id).map(|meta| (meta, score)))
+        .filter_map(|hit| index.get_doc_meta(hit.doc_id).map(|meta| (meta, hit.score)))
         .collect()
 }
 
@@ -2438,6 +2625,205 @@ mod tests {
             10,
         );
         assert_eq!(unquoted_res.len(), 2);
+
+        let _ = std::fs::remove_file(test_index_path);
+        let _ = std::fs::remove_file(test_fst_path);
+    }
+
+    #[test]
+    fn test_wand_posting_cursor_advance_and_read() {
+        let mut buf = Vec::new();
+        // doc 5, tf 1, pos [0]
+        encode_vbyte(5, &mut buf);
+        encode_vbyte(1, &mut buf);
+        encode_vbyte(0, &mut buf);
+
+        // doc 12 (delta 7), tf 2, pos [3, 8]
+        encode_vbyte(7, &mut buf);
+        encode_vbyte(2, &mut buf);
+        encode_vbyte(3, &mut buf);
+        encode_vbyte(5, &mut buf);
+
+        // doc 30 (delta 18), tf 1, pos [10]
+        encode_vbyte(18, &mut buf);
+        encode_vbyte(1, &mut buf);
+        encode_vbyte(10, &mut buf);
+
+        // doc 45 (delta 15), tf 1, pos [2]
+        encode_vbyte(15, &mut buf);
+        encode_vbyte(1, &mut buf);
+        encode_vbyte(2, &mut buf);
+
+        let mut cursor = WandPostingCursor::new(&buf, 4, 2.0, 5.0);
+        assert!(cursor.has_more);
+        assert_eq!(cursor.current_doc_id, 5);
+        assert_eq!(cursor.current_tf, 1);
+
+        // Advance to doc 20 -> should land on doc 30
+        assert!(cursor.advance_to(20));
+        assert_eq!(cursor.current_doc_id, 30);
+        assert_eq!(cursor.current_tf, 1);
+
+        // Advance to 30 -> stays on 30
+        assert!(cursor.advance_to(30));
+        assert_eq!(cursor.current_doc_id, 30);
+
+        // Advance to 40 -> lands on 45
+        assert!(cursor.advance_to(40));
+        assert_eq!(cursor.current_doc_id, 45);
+
+        // Advance past all -> ends
+        assert!(!cursor.advance_to(50));
+        assert!(!cursor.has_more);
+    }
+
+    #[test]
+    fn test_wand_multi_term_top_k_pruning() {
+        let test_index_path = "target/test_wand_prune_index.bin";
+        let test_fst_path = "target/test_wand_prune_dict.fst";
+
+        let total_docs = 6;
+        let avg_doc_length = 20.0;
+        let doc_lengths = vec![20; 6];
+        let pagerank = vec![1.0 / 6.0; 6];
+        let doc_metadata: Vec<DocMetadata> = (0..6)
+            .map(|i| DocMetadata {
+                internal_id: i,
+                hex_id: format!("doc{}", i),
+                url: format!("https://example.com/{}", i),
+                title: format!("Doc Title {}", i),
+                length: 20,
+                pagerank: 1.0 / 6.0,
+            })
+            .collect();
+
+        // 3 terms:
+        // "alpha": doc 0 (tf=5), doc 1 (tf=5), doc 2 (tf=1)
+        // "beta": doc 0 (tf=5), doc 1 (tf=4), doc 3 (tf=1)
+        // "gamma": doc 0 (tf=5), doc 4 (tf=1), doc 5 (tf=1)
+        let mut inverted_index = HashMap::new();
+        inverted_index.insert(
+            "alpha".to_string(),
+            vec![
+                Posting {
+                    doc_id: 0,
+                    term_frequency: 5,
+                    positions: vec![0, 1, 2, 3, 4],
+                },
+                Posting {
+                    doc_id: 1,
+                    term_frequency: 5,
+                    positions: vec![0, 1, 2, 3, 4],
+                },
+                Posting {
+                    doc_id: 2,
+                    term_frequency: 1,
+                    positions: vec![0],
+                },
+            ],
+        );
+        inverted_index.insert(
+            "beta".to_string(),
+            vec![
+                Posting {
+                    doc_id: 0,
+                    term_frequency: 5,
+                    positions: vec![0, 1, 2, 3, 4],
+                },
+                Posting {
+                    doc_id: 1,
+                    term_frequency: 4,
+                    positions: vec![0, 1, 2, 3],
+                },
+                Posting {
+                    doc_id: 3,
+                    term_frequency: 1,
+                    positions: vec![0],
+                },
+            ],
+        );
+        inverted_index.insert(
+            "gamma".to_string(),
+            vec![
+                Posting {
+                    doc_id: 0,
+                    term_frequency: 5,
+                    positions: vec![0, 1, 2, 3, 4],
+                },
+                Posting {
+                    doc_id: 4,
+                    term_frequency: 1,
+                    positions: vec![0],
+                },
+                Posting {
+                    doc_id: 5,
+                    term_frequency: 1,
+                    positions: vec![0],
+                },
+            ],
+        );
+
+        let mut sorted_terms = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
+        sorted_terms.sort();
+
+        BinaryIndexWriter::write_index(
+            test_index_path,
+            total_docs,
+            avg_doc_length,
+            &doc_lengths,
+            &pagerank,
+            &doc_metadata,
+            &sorted_terms,
+            &inverted_index,
+        )
+        .expect("write_index failed");
+
+        let fst_file = File::create(test_fst_path).expect("create fst failed");
+        let fst_writer = BufWriter::new(fst_file);
+        let mut builder = MapBuilder::new(fst_writer).expect("mapbuilder failed");
+        for (term_idx, term) in sorted_terms.iter().enumerate() {
+            builder
+                .insert(term.as_bytes(), term_idx as u64)
+                .expect("insert term");
+        }
+        builder.finish().expect("finish fst");
+
+        let mmap_index = MmapIndex::open(test_index_path).expect("open index failed");
+        let dictionary = TermDictionary::open(test_fst_path).expect("open dict failed");
+        let pipeline = TokenizerPipeline::new();
+
+        // Query: "alpha beta gamma" with top_k = 2
+        let top2_res = search_combined_mmap(
+            "alpha beta gamma",
+            &mmap_index,
+            &dictionary,
+            &pipeline,
+            1.0,
+            DEFAULT_EPSILON,
+            2,
+        );
+        assert_eq!(top2_res.len(), 2);
+        assert_eq!(top2_res[0].0.hex_id, "doc0");
+        assert_eq!(top2_res[1].0.hex_id, "doc1");
+        assert!(top2_res[0].1 > top2_res[1].1);
+
+        // Query with top_k = 6 -> all 6 docs returned in order
+        let all_res = search_combined_mmap(
+            "alpha beta gamma",
+            &mmap_index,
+            &dictionary,
+            &pipeline,
+            1.0,
+            DEFAULT_EPSILON,
+            6,
+        );
+        assert_eq!(all_res.len(), 6);
+        assert_eq!(all_res[0].0.hex_id, "doc0");
+        assert_eq!(all_res[1].0.hex_id, "doc1");
+
+        // Top 2 scores match exactly between top_k=2 and top_k=6
+        assert!((top2_res[0].1 - all_res[0].1).abs() < 1e-9);
+        assert!((top2_res[1].1 - all_res[1].1).abs() < 1e-9);
 
         let _ = std::fs::remove_file(test_index_path);
         let _ = std::fs::remove_file(test_fst_path);
