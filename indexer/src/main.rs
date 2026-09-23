@@ -26,6 +26,7 @@ pub struct RawDocument {
 pub struct Posting {
     pub doc_id: u32,
     pub term_frequency: u32,
+    pub positions: Vec<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -89,7 +90,22 @@ pub fn encode_postings(postings: &[Posting], buf: &mut Vec<u8>) {
         };
         last_doc_id = p.doc_id;
         encode_vbyte(delta, buf);
-        encode_vbyte(p.term_frequency, buf);
+        let tf = if !p.positions.is_empty() {
+            p.positions.len() as u32
+        } else {
+            p.term_frequency
+        };
+        encode_vbyte(tf, buf);
+        let mut last_pos = 0u32;
+        for (j, &pos) in p.positions.iter().enumerate() {
+            let pos_delta = if j == 0 {
+                pos
+            } else {
+                pos.saturating_sub(last_pos)
+            };
+            last_pos = pos;
+            encode_vbyte(pos_delta, buf);
+        }
     }
 }
 
@@ -129,10 +145,23 @@ impl<'a> Iterator for PostingsIterator<'a> {
         self.last_doc_id = doc_id;
         self.index += 1;
         self.remaining -= 1;
-        let term_frequency = decode_vbyte(self.slice, &mut self.offset).unwrap_or(1);
+        let term_frequency = decode_vbyte(self.slice, &mut self.offset).unwrap_or(0);
+        let mut positions = Vec::with_capacity(term_frequency as usize);
+        let mut last_pos = 0u32;
+        for j in 0..term_frequency {
+            let pos_delta = decode_vbyte(self.slice, &mut self.offset)?;
+            let pos = if j == 0 {
+                pos_delta
+            } else {
+                last_pos + pos_delta
+            };
+            last_pos = pos;
+            positions.push(pos);
+        }
         Some(Posting {
             doc_id,
             term_frequency,
+            positions,
         })
     }
 }
@@ -1095,13 +1124,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         url_to_id.insert(doc.url.to_string(), doc_id as usize);
         doc_links.push(doc.links.iter().map(|s| s.to_string()).collect());
 
-        // Title terms receive double weight
-        let mut title_terms = pipeline.tokenize(doc.title);
+        let title_terms = pipeline.tokenize(doc.title);
         let content_terms = pipeline.tokenize(doc.content);
 
-        let mut all_terms = Vec::with_capacity(title_terms.len() * 2 + content_terms.len());
-        all_terms.append(&mut title_terms.clone());
-        all_terms.append(&mut title_terms);
+        let mut all_terms = Vec::with_capacity(title_terms.len() + content_terms.len());
+        all_terms.extend(title_terms);
         all_terms.extend(content_terms);
 
         let doc_length = all_terms.len() as u32;
@@ -1117,15 +1144,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pagerank: 0.0,
         });
 
-        let mut tf_map: HashMap<String, u32> = HashMap::new();
-        for term in all_terms {
-            *tf_map.entry(term).or_insert(0) += 1;
+        let mut term_positions: HashMap<String, Vec<u32>> = HashMap::new();
+        for (pos, term) in all_terms.into_iter().enumerate() {
+            term_positions.entry(term).or_default().push(pos as u32);
         }
 
-        for (term, tf) in tf_map {
+        for (term, positions) in term_positions {
+            let tf = positions.len() as u32;
             inverted_index.entry(term).or_default().push(Posting {
                 doc_id,
                 term_frequency: tf,
+                positions,
             });
         }
     }
@@ -1425,6 +1454,105 @@ pub fn bm25_score(
     bm25_idf(total_docs, doc_freq) * bm25_tf_weight(tf, doc_len, avg_doc_len, k1, b)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedQuery {
+    pub phrases: Vec<Vec<String>>,
+    pub unquoted_terms: Vec<String>,
+}
+
+impl ParsedQuery {
+    pub fn all_terms(&self) -> Vec<String> {
+        let mut terms = Vec::new();
+        for phrase in &self.phrases {
+            for term in phrase {
+                if !terms.contains(term) {
+                    terms.push(term.clone());
+                }
+            }
+        }
+        for term in &self.unquoted_terms {
+            if !terms.contains(term) {
+                terms.push(term.clone());
+            }
+        }
+        terms
+    }
+}
+
+pub fn parse_query(query: &str, pipeline: &TokenizerPipeline) -> ParsedQuery {
+    let mut phrases = Vec::new();
+    let mut unquoted_text = String::new();
+
+    let mut in_quote = false;
+    let mut current_phrase = String::new();
+
+    for ch in query.chars() {
+        if ch == '"' {
+            if in_quote {
+                let tokens = pipeline.tokenize(&current_phrase);
+                if !tokens.is_empty() {
+                    phrases.push(tokens);
+                }
+                current_phrase.clear();
+                in_quote = false;
+            } else {
+                in_quote = true;
+            }
+        } else if in_quote {
+            current_phrase.push(ch);
+        } else {
+            unquoted_text.push(ch);
+        }
+    }
+
+    if in_quote && !current_phrase.is_empty() {
+        let tokens = pipeline.tokenize(&current_phrase);
+        if !tokens.is_empty() {
+            phrases.push(tokens);
+        }
+    }
+
+    let unquoted_terms = pipeline.tokenize(&unquoted_text);
+
+    ParsedQuery {
+        phrases,
+        unquoted_terms,
+    }
+}
+
+pub fn phrase_matches(positions_list: &[&[u32]]) -> bool {
+    if positions_list.is_empty() {
+        return true;
+    }
+    if positions_list.len() == 1 {
+        return !positions_list[0].is_empty();
+    }
+    let mut current_starts: Vec<u32> = positions_list[0].to_vec();
+    for (offset, next_positions) in positions_list.iter().skip(1).enumerate() {
+        let expected_offset = (offset + 1) as u32;
+        let mut next_starts = Vec::new();
+        let mut i = 0;
+        let mut j = 0;
+        while i < current_starts.len() && j < next_positions.len() {
+            let target = current_starts[i].saturating_add(expected_offset);
+            if next_positions[j] == target {
+                next_starts.push(current_starts[i]);
+                i += 1;
+                j += 1;
+            } else if next_positions[j] < target {
+                j += 1;
+            } else {
+                i += 1;
+            }
+        }
+        current_starts = next_starts;
+        if current_starts.is_empty() {
+            return false;
+        }
+    }
+    !current_starts.is_empty()
+}
+
 pub fn search_combined_mmap<'a>(
     query: &str,
     index: &'a MmapIndex,
@@ -1436,15 +1564,80 @@ pub fn search_combined_mmap<'a>(
 ) -> Vec<(DocMetaRef<'a>, f64)> {
     let k1 = 1.5;
     let b = 0.75;
-    let query_terms = pipeline.tokenize(query);
-    if query_terms.is_empty() {
+    let parsed_query = parse_query(query, pipeline);
+    let all_terms = parsed_query.all_terms();
+    if all_terms.is_empty() {
         return Vec::new();
+    }
+
+    // Filter documents by phrase requirements if any phrases exist
+    let mut phrase_matching_docs: Option<HashSet<u32>> = None;
+
+    for phrase in &parsed_query.phrases {
+        if phrase.is_empty() {
+            continue;
+        }
+        let mut term_postings = Vec::with_capacity(phrase.len());
+        let mut all_found = true;
+        for term in phrase {
+            if let Some(term_idx) = dictionary.get(term)
+                && let Some(entry) = index.get_term_entry(term_idx as usize)
+            {
+                let slice = index.get_postings_slice(&entry);
+                let iter = PostingsIterator::new(slice, entry.doc_freq as usize);
+                let map: HashMap<u32, Vec<u32>> = iter.map(|p| (p.doc_id, p.positions)).collect();
+                term_postings.push(map);
+            } else {
+                all_found = false;
+                break;
+            }
+        }
+
+        if !all_found {
+            return Vec::new();
+        }
+
+        let mut matching_in_phrase = HashSet::new();
+        if let Some(first_map) = term_postings.first() {
+            for (&doc_id, first_positions) in first_map {
+                let mut doc_positions: Vec<&[u32]> = Vec::with_capacity(term_postings.len());
+                doc_positions.push(first_positions.as_slice());
+                let mut in_all = true;
+                for next_map in &term_postings[1..] {
+                    if let Some(pos) = next_map.get(&doc_id) {
+                        doc_positions.push(pos.as_slice());
+                    } else {
+                        in_all = false;
+                        break;
+                    }
+                }
+                if in_all && phrase_matches(&doc_positions) {
+                    matching_in_phrase.insert(doc_id);
+                }
+            }
+        }
+
+        phrase_matching_docs = match phrase_matching_docs {
+            None => Some(matching_in_phrase),
+            Some(existing) => Some(
+                existing
+                    .intersection(&matching_in_phrase)
+                    .copied()
+                    .collect(),
+            ),
+        };
+
+        if let Some(ref docs) = phrase_matching_docs
+            && docs.is_empty()
+        {
+            return Vec::new();
+        }
     }
 
     let mut scores: HashMap<u32, f64> = HashMap::new();
     let n = index.total_docs as f64;
 
-    for term in &query_terms {
+    for term in &all_terms {
         if let Some(term_idx) = dictionary.get(term)
             && let Some(entry) = index.get_term_entry(term_idx as usize)
         {
@@ -1454,6 +1647,12 @@ pub fn search_combined_mmap<'a>(
             let iter = PostingsIterator::new(postings_slice, entry.doc_freq as usize);
 
             for posting in iter {
+                if let Some(ref allowed_docs) = phrase_matching_docs
+                    && !allowed_docs.contains(&posting.doc_id)
+                {
+                    continue;
+                }
+
                 let doc_len = index.get_doc_length(posting.doc_id) as f64;
                 let tf = posting.term_frequency as f64;
                 let term_score = idf * bm25_tf_weight(tf, doc_len, index.avg_doc_length, k1, b);
@@ -1621,22 +1820,27 @@ mod tests {
             Posting {
                 doc_id: 10,
                 term_frequency: 1,
+                positions: vec![3],
             },
             Posting {
                 doc_id: 15,
                 term_frequency: 3,
+                positions: vec![1, 5, 12],
             },
             Posting {
                 doc_id: 42,
                 term_frequency: 2,
+                positions: vec![0, 7],
             },
             Posting {
                 doc_id: 100,
-                term_frequency: 10,
+                term_frequency: 4,
+                positions: vec![2, 4, 6, 8],
             },
             Posting {
                 doc_id: 105,
                 term_frequency: 1,
+                positions: vec![100],
             },
         ];
 
@@ -1654,15 +1858,18 @@ mod tests {
         let original_postings = vec![
             Posting {
                 doc_id: 0,
-                term_frequency: 5,
+                term_frequency: 3,
+                positions: vec![0, 1, 2],
             },
             Posting {
                 doc_id: 1,
                 term_frequency: 2,
+                positions: vec![5, 10],
             },
             Posting {
                 doc_id: 2,
                 term_frequency: 1,
+                positions: vec![20],
             },
         ];
 
@@ -1681,18 +1888,22 @@ mod tests {
             Posting {
                 doc_id: 5,
                 term_frequency: 1,
+                positions: vec![10],
             },
             Posting {
                 doc_id: 1_000,
-                term_frequency: 4,
+                term_frequency: 2,
+                positions: vec![50, 500],
             },
             Posting {
                 doc_id: 100_000,
                 term_frequency: 2,
+                positions: vec![1_000, 20_000],
             },
             Posting {
                 doc_id: 5_000_000,
-                term_frequency: 8,
+                term_frequency: 3,
+                positions: vec![100, 200_000, 1_000_000],
             },
         ];
 
@@ -1715,7 +1926,8 @@ mod tests {
         // Single posting
         let single = vec![Posting {
             doc_id: 777,
-            term_frequency: 13,
+            term_frequency: 2,
+            positions: vec![42, 99],
         }];
         let mut buf = Vec::new();
         encode_postings(&single, &mut buf);
@@ -1728,13 +1940,20 @@ mod tests {
     #[test]
     fn test_delta_decoding_direct_accumulator() {
         // Test that deltas [10, 5, 20] decode into absolute doc_ids [10, 15, 35]
+        // and position deltas decode into absolute word offsets
         let mut buf = Vec::new();
         encode_vbyte(10, &mut buf); // doc_id delta: 10
         encode_vbyte(2, &mut buf); // tf: 2
+        encode_vbyte(5, &mut buf); // pos_delta: 5 -> pos: 5
+        encode_vbyte(3, &mut buf); // pos_delta: 3 -> pos: 8
         encode_vbyte(5, &mut buf); // doc_id delta: 5 -> doc_id: 15
         encode_vbyte(1, &mut buf); // tf: 1
+        encode_vbyte(12, &mut buf); // pos_delta: 12 -> pos: 12
         encode_vbyte(20, &mut buf); // doc_id delta: 20 -> doc_id: 35
-        encode_vbyte(4, &mut buf); // tf: 4
+        encode_vbyte(3, &mut buf); // tf: 3
+        encode_vbyte(1, &mut buf); // pos_delta: 1 -> pos: 1
+        encode_vbyte(4, &mut buf); // pos_delta: 4 -> pos: 5
+        encode_vbyte(10, &mut buf); // pos_delta: 10 -> pos: 15
 
         let iter = PostingsIterator::new(&buf, 3);
         let decoded: Vec<Posting> = iter.collect();
@@ -1744,18 +1963,92 @@ mod tests {
             vec![
                 Posting {
                     doc_id: 10,
-                    term_frequency: 2
+                    term_frequency: 2,
+                    positions: vec![5, 8],
                 },
                 Posting {
                     doc_id: 15,
-                    term_frequency: 1
+                    term_frequency: 1,
+                    positions: vec![12],
                 },
                 Posting {
                     doc_id: 35,
-                    term_frequency: 4
+                    term_frequency: 3,
+                    positions: vec![1, 5, 15],
                 },
             ]
         );
+    }
+
+    // ------------------------------------------------------------------------
+    // Phrase Matching & Query Parsing Tests
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn test_phrase_matches_basic() {
+        // Single term
+        assert!(phrase_matches(&[&[1, 5, 10]]));
+        assert!(!phrase_matches(&[&[]]));
+
+        // Two terms consecutive: pos 4 in first, pos 5 in second
+        let pos1 = [2, 4, 10];
+        let pos2 = [5, 20];
+        assert!(phrase_matches(&[&pos1, &pos2]));
+
+        // Two terms non-consecutive
+        let pos1_fail = [2, 4, 10];
+        let pos2_fail = [7, 20];
+        assert!(!phrase_matches(&[&pos1_fail, &pos2_fail]));
+
+        // Two terms reverse order
+        let pos1_rev = [5];
+        let pos2_rev = [4];
+        assert!(!phrase_matches(&[&pos1_rev, &pos2_rev]));
+
+        // Three terms consecutive: 10, 11, 12
+        let p1 = [1, 10, 50];
+        let p2 = [2, 11, 60];
+        let p3 = [3, 12, 70];
+        assert!(phrase_matches(&[&p1, &p2, &p3]));
+
+        // Three terms where third term misses
+        let p1_m = [10, 50];
+        let p2_m = [11, 60];
+        let p3_m_fail = [13, 70];
+        assert!(!phrase_matches(&[&p1_m, &p2_m, &p3_m_fail]));
+    }
+
+    #[test]
+    fn test_parse_query_variations() {
+        let pipeline = TokenizerPipeline::new();
+
+        // Plain unquoted query
+        let q1 = parse_query("distributed systems", &pipeline);
+        assert!(q1.phrases.is_empty());
+        assert_eq!(q1.unquoted_terms, vec!["distribut", "system"]);
+
+        // Pure quoted query
+        let q2 = parse_query("\"distributed systems\"", &pipeline);
+        assert_eq!(q2.phrases, vec![vec!["distribut", "system"]]);
+        assert!(q2.unquoted_terms.is_empty());
+
+        // Mixed quoted and unquoted
+        let q3 = parse_query("rust \"distributed systems\" fast", &pipeline);
+        assert_eq!(q3.phrases, vec![vec!["distribut", "system"]]);
+        assert_eq!(q3.unquoted_terms, vec!["rust", "fast"]);
+
+        // Multiple quoted phrases
+        let q4 = parse_query("\"distributed systems\" \"fault tolerance\"", &pipeline);
+        assert_eq!(
+            q4.phrases,
+            vec![vec!["distribut", "system"], vec!["fault", "toler"]]
+        );
+        assert!(q4.unquoted_terms.is_empty());
+
+        // Unclosed quote at end
+        let q5 = parse_query("\"distributed systems", &pipeline);
+        assert_eq!(q5.phrases, vec![vec!["distribut", "system"]]);
+        assert!(q5.unquoted_terms.is_empty());
     }
 
     // ------------------------------------------------------------------------
@@ -1981,6 +2274,7 @@ mod tests {
             vec![Posting {
                 doc_id: 0,
                 term_frequency: 1,
+                positions: vec![0],
             }],
         );
 
@@ -2007,5 +2301,145 @@ mod tests {
         assert_eq!(meta1.title, "Doc 2");
 
         let _ = std::fs::remove_file(test_path);
+    }
+
+    #[test]
+    fn test_quoted_query_search_integration() {
+        let test_index_path = "target/test_quoted_search_index.bin";
+        let test_fst_path = "target/test_quoted_search_dict.fst";
+
+        let total_docs = 3;
+        let avg_doc_length = 10.0;
+        let doc_lengths = vec![10, 10, 10];
+        let pagerank = vec![0.33, 0.33, 0.34];
+        let doc_metadata = vec![
+            DocMetadata {
+                internal_id: 0,
+                hex_id: "doc0".to_string(),
+                url: "https://example.com/0".to_string(),
+                title: "Distributed Systems Intro".to_string(),
+                length: 10,
+                pagerank: 0.33,
+            },
+            DocMetadata {
+                internal_id: 1,
+                hex_id: "doc1".to_string(),
+                url: "https://example.com/1".to_string(),
+                title: "Systems That Are Distributed".to_string(),
+                length: 10,
+                pagerank: 0.33,
+            },
+            DocMetadata {
+                internal_id: 2,
+                hex_id: "doc2".to_string(),
+                url: "https://example.com/2".to_string(),
+                title: "Unrelated Topic".to_string(),
+                length: 10,
+                pagerank: 0.34,
+            },
+        ];
+
+        // Doc 0: "distribut" at pos 0, "system" at pos 1 (consecutive)
+        // Doc 1: "system" at pos 0, "distribut" at pos 4 (non-consecutive and reversed)
+        let mut inverted_index = HashMap::new();
+        inverted_index.insert(
+            "distribut".to_string(),
+            vec![
+                Posting {
+                    doc_id: 0,
+                    term_frequency: 1,
+                    positions: vec![0],
+                },
+                Posting {
+                    doc_id: 1,
+                    term_frequency: 1,
+                    positions: vec![4],
+                },
+            ],
+        );
+        inverted_index.insert(
+            "system".to_string(),
+            vec![
+                Posting {
+                    doc_id: 0,
+                    term_frequency: 1,
+                    positions: vec![1],
+                },
+                Posting {
+                    doc_id: 1,
+                    term_frequency: 1,
+                    positions: vec![0],
+                },
+            ],
+        );
+
+        let mut sorted_terms = vec!["distribut".to_string(), "system".to_string()];
+        sorted_terms.sort();
+
+        BinaryIndexWriter::write_index(
+            test_index_path,
+            total_docs,
+            avg_doc_length,
+            &doc_lengths,
+            &pagerank,
+            &doc_metadata,
+            &sorted_terms,
+            &inverted_index,
+        )
+        .expect("write_index failed");
+
+        let fst_file = File::create(test_fst_path).expect("create fst failed");
+        let fst_writer = BufWriter::new(fst_file);
+        let mut builder = MapBuilder::new(fst_writer).expect("mapbuilder failed");
+        for (term_idx, term) in sorted_terms.iter().enumerate() {
+            builder
+                .insert(term.as_bytes(), term_idx as u64)
+                .expect("insert term");
+        }
+        builder.finish().expect("finish fst");
+
+        let mmap_index = MmapIndex::open(test_index_path).expect("open index failed");
+        let dictionary = TermDictionary::open(test_fst_path).expect("open dict failed");
+        let pipeline = TokenizerPipeline::new();
+
+        // 1. Quoted query: "distributed systems" -> only doc 0 matches
+        let quoted_res = search_combined_mmap(
+            "\"distributed systems\"",
+            &mmap_index,
+            &dictionary,
+            &pipeline,
+            1.0,
+            DEFAULT_EPSILON,
+            10,
+        );
+        assert_eq!(quoted_res.len(), 1);
+        assert_eq!(quoted_res[0].0.hex_id, "doc0");
+
+        // 2. Reversed quoted query: "systems distributed" -> 0 hits
+        let rev_res = search_combined_mmap(
+            "\"systems distributed\"",
+            &mmap_index,
+            &dictionary,
+            &pipeline,
+            1.0,
+            DEFAULT_EPSILON,
+            10,
+        );
+        assert_eq!(rev_res.len(), 0);
+
+        // 3. Unquoted query: distributed systems -> both doc 0 and doc 1 match
+        let unquoted_res = search_combined_mmap(
+            "distributed systems",
+            &mmap_index,
+            &dictionary,
+            &pipeline,
+            1.0,
+            DEFAULT_EPSILON,
+            10,
+        );
+        assert_eq!(unquoted_res.len(), 2);
+
+        let _ = std::fs::remove_file(test_index_path);
+        let _ = std::fs::remove_file(test_fst_path);
     }
 }
