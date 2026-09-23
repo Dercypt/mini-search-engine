@@ -35,6 +35,8 @@ pub struct DocMetadata {
     pub url: String,
     pub title: String,
     pub length: u32,
+    #[serde(default)]
+    pub pagerank: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -144,6 +146,7 @@ pub struct DocRecordRef<'a> {
     pub url: &'a str,
     pub title: &'a str,
     pub content: &'a str,
+    pub links: Vec<&'a str>,
 }
 
 pub struct DocStoreWriter {
@@ -339,12 +342,37 @@ impl MmapDocStore {
             return None;
         }
         let content = std::str::from_utf8(&slice[pos..pos + content_len]).ok()?;
+        pos += content_len;
+
+        let mut links = Vec::new();
+        if pos + 4 <= slice.len() {
+            let links_count =
+                u32::from_le_bytes([slice[pos], slice[pos + 1], slice[pos + 2], slice[pos + 3]])
+                    as usize;
+            pos += 4;
+            links.reserve(links_count);
+            for _ in 0..links_count {
+                if pos + 2 > slice.len() {
+                    break;
+                }
+                let link_len = u16::from_le_bytes([slice[pos], slice[pos + 1]]) as usize;
+                pos += 2;
+                if pos + link_len > slice.len() {
+                    break;
+                }
+                if let Ok(link_str) = std::str::from_utf8(&slice[pos..pos + link_len]) {
+                    links.push(link_str);
+                }
+                pos += link_len;
+            }
+        }
 
         Some(DocRecordRef {
             id,
             url,
             title,
             content,
+            links,
         })
     }
 }
@@ -393,16 +421,19 @@ pub struct DocMetaRef<'a> {
     pub hex_id: &'a str,
     pub url: &'a str,
     pub title: &'a str,
+    pub pagerank: f64,
 }
 
 pub struct BinaryIndexWriter;
 
 impl BinaryIndexWriter {
+    #[allow(clippy::too_many_arguments)]
     pub fn write_index<P: AsRef<Path>>(
         path: P,
         total_docs: u32,
         avg_doc_length: f64,
         doc_lengths: &[u32],
+        pagerank: &[f64],
         doc_metadata: &[DocMetadata],
         sorted_terms: &[String],
         inverted_index: &HashMap<String, Vec<Posting>>,
@@ -422,7 +453,14 @@ impl BinaryIndexWriter {
         }
         current_offset += (doc_lengths.len() * 4) as u64;
 
-        // 2. Doc Meta Index & Data
+        // 2. PageRank
+        let pagerank_offset = current_offset;
+        for &pr in pagerank {
+            writer.write_all(&pr.to_le_bytes())?;
+        }
+        current_offset += (pagerank.len() * 8) as u64;
+
+        // 3. Doc Meta Index & Data
         let doc_meta_index_offset = current_offset;
         let mut meta_offsets = Vec::with_capacity(doc_metadata.len() + 1);
         let mut meta_data_bytes = Vec::new();
@@ -524,7 +562,8 @@ impl BinaryIndexWriter {
         file.write_all(&terms_strings_offset.to_le_bytes())?;
         file.write_all(&postings_offset.to_le_bytes())?;
         file.write_all(&postings_bytes_len.to_le_bytes())?;
-        let padding = [0u8; 48];
+        file.write_all(&pagerank_offset.to_le_bytes())?;
+        let padding = [0u8; 40];
         file.write_all(&padding)?;
         file.flush()?;
 
@@ -538,6 +577,7 @@ pub struct MmapIndex {
     pub avg_doc_length: f64,
     pub num_terms: u32,
     doc_lengths_offset: usize,
+    pagerank_offset: usize,
     doc_meta_index_offset: usize,
     doc_meta_data_offset: usize,
     terms_table_offset: usize,
@@ -564,6 +604,11 @@ impl MmapIndex {
         let num_terms = u32::from_le_bytes(mmap[52..56].try_into().unwrap());
         let terms_strings_offset = u64::from_le_bytes(mmap[56..64].try_into().unwrap()) as usize;
         let postings_offset = u64::from_le_bytes(mmap[64..72].try_into().unwrap()) as usize;
+        let pagerank_offset = if mmap.len() >= 88 {
+            u64::from_le_bytes(mmap[80..88].try_into().unwrap()) as usize
+        } else {
+            0
+        };
 
         Ok(Self {
             mmap,
@@ -571,6 +616,7 @@ impl MmapIndex {
             avg_doc_length,
             num_terms,
             doc_lengths_offset,
+            pagerank_offset,
             doc_meta_index_offset,
             doc_meta_data_offset,
             terms_table_offset,
@@ -586,6 +632,26 @@ impl MmapIndex {
         }
         let off = self.doc_lengths_offset + (doc_id as usize) * 4;
         u32::from_le_bytes(self.mmap[off..off + 4].try_into().unwrap())
+    }
+
+    #[inline]
+    pub fn get_pagerank(&self, doc_id: u32) -> f64 {
+        if doc_id >= self.total_docs || self.pagerank_offset == 0 {
+            return if self.total_docs > 0 {
+                1.0 / (self.total_docs as f64)
+            } else {
+                0.0
+            };
+        }
+        let off = self.pagerank_offset + (doc_id as usize) * 8;
+        if off + 8 > self.mmap.len() {
+            return if self.total_docs > 0 {
+                1.0 / (self.total_docs as f64)
+            } else {
+                0.0
+            };
+        }
+        f64::from_le_bytes(self.mmap[off..off + 8].try_into().unwrap())
     }
 
     pub fn get_doc_meta(&self, doc_id: u32) -> Option<DocMetaRef<'_>> {
@@ -628,7 +694,14 @@ impl MmapIndex {
         pos += 2;
         let title = std::str::from_utf8(&slice[pos..pos + title_len]).ok()?;
 
-        Some(DocMetaRef { hex_id, url, title })
+        let pagerank = self.get_pagerank(doc_id);
+
+        Some(DocMetaRef {
+            hex_id,
+            url,
+            title,
+            pagerank,
+        })
     }
 
     #[inline]
@@ -1011,11 +1084,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut doc_metadata: Vec<DocMetadata> = Vec::with_capacity(total_docs as usize);
     let mut doc_lengths: Vec<u32> = Vec::with_capacity(total_docs as usize);
     let mut total_terms: usize = 0;
+    let mut url_to_id: HashMap<String, usize> = HashMap::with_capacity(total_docs as usize);
+    let mut doc_links: Vec<Vec<String>> = Vec::with_capacity(total_docs as usize);
 
     for doc_id in 0..total_docs {
         let doc = doc_store
             .get_doc(doc_id)
             .ok_or_else(|| format!("Failed to read doc {doc_id}"))?;
+
+        url_to_id.insert(doc.url.to_string(), doc_id as usize);
+        doc_links.push(doc.links.iter().map(|s| s.to_string()).collect());
 
         // Title terms receive double weight
         let mut title_terms = pipeline.tokenize(doc.title);
@@ -1036,6 +1114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             url: doc.url.to_string(),
             title: doc.title.to_string(),
             length: doc_length,
+            pagerank: 0.0,
         });
 
         let mut tf_map: HashMap<String, u32> = HashMap::new();
@@ -1064,6 +1143,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         index_start.elapsed()
     );
 
+    // Compute PageRank via Power Iteration
+    println!("Computing PageRank via Power Iteration pass...");
+    let pagerank_start = Instant::now();
+    let pagerank_scores = compute_pagerank(
+        total_docs as usize,
+        &doc_links,
+        &url_to_id,
+        &PageRankConfig::default(),
+    );
+    for (doc_id, &score) in pagerank_scores.iter().enumerate() {
+        if doc_id < doc_metadata.len() {
+            doc_metadata[doc_id].pagerank = score;
+        }
+    }
+    println!(
+        "Computed PageRank for {} documents in {:?}",
+        total_docs,
+        pagerank_start.elapsed()
+    );
+
     // Sort terms lexicographically for FST and binary index
     let mut sorted_terms: Vec<String> = inverted_index.keys().cloned().collect();
     sorted_terms.sort();
@@ -1081,6 +1180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         total_docs,
         avg_doc_length,
         &doc_lengths,
+        &pagerank_scores,
         &doc_metadata,
         &sorted_terms,
         &inverted_index,
@@ -1128,7 +1228,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         json_save_start.elapsed()
     );
 
-    // Test BM25 Query Evaluation using memory-mapped binary index
+    // Test BM25 & PageRank Query Evaluation using memory-mapped binary index
     println!("\nVerifying retrieval against memory-mapped binary index (mmap)...");
     let mmap_index = MmapIndex::open(&output_bin_index_path)?;
     let dictionary = TermDictionary::open(&output_fst_path)?;
@@ -1136,9 +1236,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let test_queries = ["search engine", "page rank algorithm", "open source"];
     for query in test_queries {
         println!("\n--- Test Query: \"{}\" ---", query);
-        let results = search_bm25_mmap(query, &mmap_index, &dictionary, &pipeline, 5);
+        let results = search_combined_mmap(
+            query,
+            &mmap_index,
+            &dictionary,
+            &pipeline,
+            DEFAULT_ALPHA,
+            DEFAULT_EPSILON,
+            5,
+        );
         for (rank, (doc, score)) in results.iter().enumerate() {
-            println!("{}. [{:.4}] {} ({})", rank + 1, score, doc.title, doc.url);
+            println!(
+                "{}. [{:.4}] (PR: {:.6}) {} ({})",
+                rank + 1,
+                score,
+                doc.pagerank,
+                doc.title,
+                doc.url
+            );
         }
     }
 
@@ -1146,8 +1261,141 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // ============================================================================
-// BM25 Scoring Formulas
+// PageRank & BM25 Scoring Formulas
 // ============================================================================
+
+pub const DEFAULT_ALPHA: f64 = 0.7;
+pub const DEFAULT_EPSILON: f64 = 1e-6;
+
+#[derive(Debug, Clone)]
+pub struct PageRankConfig {
+    pub damping: f64,
+    pub max_iterations: usize,
+    pub tolerance: f64,
+}
+
+impl Default for PageRankConfig {
+    fn default() -> Self {
+        Self {
+            damping: 0.85,
+            max_iterations: 100,
+            tolerance: 1e-7,
+        }
+    }
+}
+
+pub fn resolve_url_to_id(link: &str, url_to_id: &HashMap<String, usize>) -> Option<usize> {
+    if let Some(&id) = url_to_id.get(link) {
+        return Some(id);
+    }
+    if let Some(stripped) = link.strip_suffix('/') {
+        if let Some(&id) = url_to_id.get(stripped) {
+            return Some(id);
+        }
+    } else {
+        let with_slash = format!("{link}/");
+        if let Some(&id) = url_to_id.get(&with_slash) {
+            return Some(id);
+        }
+    }
+    None
+}
+
+pub fn build_pagerank_graph(
+    total_docs: usize,
+    doc_links: &[Vec<String>],
+    url_to_id: &HashMap<String, usize>,
+) -> Vec<Vec<usize>> {
+    let mut out_edges = Vec::with_capacity(total_docs);
+    for (u, links) in doc_links.iter().enumerate() {
+        let mut targets = HashSet::new();
+        for link in links {
+            if let Some(target_id) = resolve_url_to_id(link, url_to_id)
+                && target_id != u
+            {
+                targets.insert(target_id);
+            }
+        }
+        let mut target_vec: Vec<usize> = targets.into_iter().collect();
+        target_vec.sort_unstable();
+        out_edges.push(target_vec);
+    }
+    out_edges
+}
+
+pub fn power_iteration_pagerank(
+    total_docs: usize,
+    out_edges: &[Vec<usize>],
+    config: &PageRankConfig,
+) -> Vec<f64> {
+    if total_docs == 0 {
+        return Vec::new();
+    }
+    if total_docs == 1 {
+        return vec![1.0];
+    }
+
+    let n = total_docs as f64;
+    let damping = config.damping;
+    let mut pr = vec![1.0 / n; total_docs];
+
+    let out_degrees: Vec<usize> = out_edges.iter().map(|edges| edges.len()).collect();
+
+    for _iter in 0..config.max_iterations {
+        // Collect PageRank mass from dangling nodes (out_degree == 0)
+        let dangling_sum: f64 = (0..total_docs)
+            .filter(|&u| out_degrees[u] == 0)
+            .map(|u| pr[u])
+            .sum();
+
+        let base_score = (1.0 - damping) / n + (damping * dangling_sum) / n;
+        let mut next_pr = vec![base_score; total_docs];
+
+        for u in 0..total_docs {
+            let deg = out_degrees[u];
+            if deg > 0 {
+                let contribution = (damping * pr[u]) / (deg as f64);
+                for &v in &out_edges[u] {
+                    next_pr[v] += contribution;
+                }
+            }
+        }
+
+        let delta: f64 = pr
+            .iter()
+            .zip(next_pr.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
+
+        pr = next_pr;
+
+        if delta < config.tolerance {
+            break;
+        }
+    }
+
+    pr
+}
+
+pub fn compute_pagerank(
+    total_docs: usize,
+    doc_links: &[Vec<String>],
+    url_to_id: &HashMap<String, usize>,
+    config: &PageRankConfig,
+) -> Vec<f64> {
+    let out_edges = build_pagerank_graph(total_docs, doc_links, url_to_id);
+    power_iteration_pagerank(total_docs, &out_edges, config)
+}
+
+#[inline]
+pub fn final_score(bm25_score: f64, pagerank: f64, alpha: f64, epsilon: f64) -> f64 {
+    alpha * bm25_score + (1.0 - alpha) * (pagerank + epsilon).ln()
+}
+
+#[inline]
+pub fn compute_final_score(bm25_score: f64, pagerank: f64, alpha: f64, epsilon: f64) -> f64 {
+    final_score(bm25_score, pagerank, alpha, epsilon)
+}
 
 #[inline]
 pub fn bm25_idf(total_docs: f64, doc_freq: f64) -> f64 {
@@ -1177,11 +1425,13 @@ pub fn bm25_score(
     bm25_idf(total_docs, doc_freq) * bm25_tf_weight(tf, doc_len, avg_doc_len, k1, b)
 }
 
-pub fn search_bm25_mmap<'a>(
+pub fn search_combined_mmap<'a>(
     query: &str,
     index: &'a MmapIndex,
     dictionary: &TermDictionary,
     pipeline: &TokenizerPipeline,
+    alpha: f64,
+    epsilon: f64,
     top_k: usize,
 ) -> Vec<(DocMetaRef<'a>, f64)> {
     let k1 = 1.5;
@@ -1213,7 +1463,15 @@ pub fn search_bm25_mmap<'a>(
         }
     }
 
-    let mut ranked: Vec<(u32, f64)> = scores.into_iter().collect();
+    let mut ranked: Vec<(u32, f64)> = scores
+        .into_iter()
+        .map(|(doc_id, bm25)| {
+            let pr = index.get_pagerank(doc_id);
+            let combined = final_score(bm25, pr, alpha, epsilon);
+            (doc_id, combined)
+        })
+        .collect();
+
     ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     ranked.truncate(top_k);
 
@@ -1221,6 +1479,24 @@ pub fn search_bm25_mmap<'a>(
         .into_iter()
         .filter_map(|(doc_id, score)| index.get_doc_meta(doc_id).map(|meta| (meta, score)))
         .collect()
+}
+
+pub fn search_bm25_mmap<'a>(
+    query: &str,
+    index: &'a MmapIndex,
+    dictionary: &TermDictionary,
+    pipeline: &TokenizerPipeline,
+    top_k: usize,
+) -> Vec<(DocMetaRef<'a>, f64)> {
+    search_combined_mmap(
+        query,
+        index,
+        dictionary,
+        pipeline,
+        1.0,
+        DEFAULT_EPSILON,
+        top_k,
+    )
 }
 
 #[cfg(test)]
@@ -1580,5 +1856,156 @@ mod tests {
 
         assert_eq!(score, idf * tf_weight);
         assert!(score > 0.0);
+    }
+
+    // ------------------------------------------------------------------------
+    // PageRank & FinalScore Tests
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn test_pagerank_two_nodes_symmetric() {
+        // 0 -> 1 and 1 -> 0
+        let edges = vec![vec![1], vec![0]];
+        let config = PageRankConfig::default();
+        let pr = power_iteration_pagerank(2, &edges, &config);
+
+        assert_eq!(pr.len(), 2);
+        assert!((pr[0] - 0.5).abs() < 1e-6);
+        assert!((pr[1] - 0.5).abs() < 1e-6);
+        assert!((pr[0] + pr[1] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_pagerank_three_nodes_flow() {
+        // 0 -> 1, 0 -> 2
+        // 1 -> 2
+        // 2 -> 0
+        // Node 2 has highest incoming authority
+        let edges = vec![vec![1, 2], vec![2], vec![0]];
+        let config = PageRankConfig::default();
+        let pr = power_iteration_pagerank(3, &edges, &config);
+
+        assert_eq!(pr.len(), 3);
+        let sum: f64 = pr.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-6);
+        assert!(pr[2] > pr[0]);
+        assert!(pr[2] > pr[1]);
+    }
+
+    #[test]
+    fn test_pagerank_dangling_node_mass_preservation() {
+        // 0 -> 1; 1 has no outgoing links (dangling)
+        let edges = vec![vec![1], vec![]];
+        let config = PageRankConfig::default();
+        let pr = power_iteration_pagerank(2, &edges, &config);
+
+        assert_eq!(pr.len(), 2);
+        let sum: f64 = pr.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-6);
+        // Node 1 receives incoming link from 0, so pr[1] > pr[0]
+        assert!(pr[1] > pr[0]);
+    }
+
+    #[test]
+    fn test_pagerank_empty_and_single_node() {
+        let config = PageRankConfig::default();
+        assert_eq!(power_iteration_pagerank(0, &[], &config), Vec::<f64>::new());
+        assert_eq!(power_iteration_pagerank(1, &[vec![]], &config), vec![1.0]);
+    }
+
+    #[test]
+    fn test_final_score_formula() {
+        let bm25: f64 = 4.0;
+        let pr: f64 = 0.05;
+        let alpha: f64 = 0.7;
+        let epsilon: f64 = 1e-6;
+
+        let expected = alpha * bm25 + (1.0 - alpha) * (pr + epsilon).ln();
+        let computed = final_score(bm25, pr, alpha, epsilon);
+
+        assert!((computed - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_final_score_alpha_bounds() {
+        let bm25: f64 = 5.5;
+        let pr: f64 = 0.02;
+        let epsilon: f64 = 1e-6;
+
+        // When alpha = 1.0, score must equal pure BM25
+        let score_pure_bm25 = final_score(bm25, pr, 1.0, epsilon);
+        assert!((score_pure_bm25 - bm25).abs() < 1e-10);
+
+        // When alpha = 0.0, score must equal pure log(PageRank + epsilon)
+        let score_pure_pr = final_score(bm25, pr, 0.0, epsilon);
+        assert!((score_pure_pr - (pr + epsilon).ln()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_binary_index_pagerank_roundtrip() {
+        let test_path = "target/test_pagerank_index.bin";
+        let total_docs = 3;
+        let avg_doc_length = 50.0;
+        let doc_lengths = vec![40, 50, 60];
+        let pagerank = vec![0.2, 0.5, 0.3];
+        let doc_metadata = vec![
+            DocMetadata {
+                internal_id: 0,
+                hex_id: "000001".to_string(),
+                url: "https://example.com/1".to_string(),
+                title: "Doc 1".to_string(),
+                length: 40,
+                pagerank: 0.2,
+            },
+            DocMetadata {
+                internal_id: 1,
+                hex_id: "000002".to_string(),
+                url: "https://example.com/2".to_string(),
+                title: "Doc 2".to_string(),
+                length: 50,
+                pagerank: 0.5,
+            },
+            DocMetadata {
+                internal_id: 2,
+                hex_id: "000003".to_string(),
+                url: "https://example.com/3".to_string(),
+                title: "Doc 3".to_string(),
+                length: 60,
+                pagerank: 0.3,
+            },
+        ];
+        let sorted_terms = vec!["term".to_string()];
+        let mut inverted_index = HashMap::new();
+        inverted_index.insert(
+            "term".to_string(),
+            vec![Posting {
+                doc_id: 0,
+                term_frequency: 1,
+            }],
+        );
+
+        BinaryIndexWriter::write_index(
+            test_path,
+            total_docs,
+            avg_doc_length,
+            &doc_lengths,
+            &pagerank,
+            &doc_metadata,
+            &sorted_terms,
+            &inverted_index,
+        )
+        .expect("write_index failed");
+
+        let mmap_index = MmapIndex::open(test_path).expect("open failed");
+        assert_eq!(mmap_index.total_docs, total_docs);
+        assert!((mmap_index.get_pagerank(0) - 0.2).abs() < 1e-9);
+        assert!((mmap_index.get_pagerank(1) - 0.5).abs() < 1e-9);
+        assert!((mmap_index.get_pagerank(2) - 0.3).abs() < 1e-9);
+
+        let meta1 = mmap_index.get_doc_meta(1).expect("meta 1 missing");
+        assert!((meta1.pagerank - 0.5).abs() < 1e-9);
+        assert_eq!(meta1.title, "Doc 2");
+
+        let _ = std::fs::remove_file(test_path);
     }
 }
