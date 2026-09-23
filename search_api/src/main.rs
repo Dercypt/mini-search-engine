@@ -103,6 +103,7 @@ pub struct DocRecordRef<'a> {
     pub url: &'a str,
     pub title: &'a str,
     pub content: &'a str,
+    pub links: Vec<&'a str>,
 }
 
 pub struct MmapDocStore {
@@ -206,12 +207,37 @@ impl MmapDocStore {
             return None;
         }
         let content = std::str::from_utf8(&slice[pos..pos + content_len]).ok()?;
+        pos += content_len;
+
+        let mut links = Vec::new();
+        if pos + 4 <= slice.len() {
+            let links_count =
+                u32::from_le_bytes([slice[pos], slice[pos + 1], slice[pos + 2], slice[pos + 3]])
+                    as usize;
+            pos += 4;
+            links.reserve(links_count);
+            for _ in 0..links_count {
+                if pos + 2 > slice.len() {
+                    break;
+                }
+                let link_len = u16::from_le_bytes([slice[pos], slice[pos + 1]]) as usize;
+                pos += 2;
+                if pos + link_len > slice.len() {
+                    break;
+                }
+                if let Ok(link_str) = std::str::from_utf8(&slice[pos..pos + link_len]) {
+                    links.push(link_str);
+                }
+                pos += link_len;
+            }
+        }
 
         Some(DocRecordRef {
             id,
             url,
             title,
             content,
+            links,
         })
     }
 
@@ -234,6 +260,7 @@ pub struct DocMetaRef<'a> {
     pub hex_id: &'a str,
     pub url: &'a str,
     pub title: &'a str,
+    pub pagerank: f64,
 }
 
 pub struct MmapIndex {
@@ -242,6 +269,7 @@ pub struct MmapIndex {
     pub avg_doc_length: f64,
     pub num_terms: u32,
     doc_lengths_offset: usize,
+    pagerank_offset: usize,
     doc_meta_index_offset: usize,
     doc_meta_data_offset: usize,
     terms_table_offset: usize,
@@ -268,6 +296,11 @@ impl MmapIndex {
         let num_terms = u32::from_le_bytes(mmap[52..56].try_into().unwrap());
         let terms_strings_offset = u64::from_le_bytes(mmap[56..64].try_into().unwrap()) as usize;
         let postings_offset = u64::from_le_bytes(mmap[64..72].try_into().unwrap()) as usize;
+        let pagerank_offset = if mmap.len() >= 88 {
+            u64::from_le_bytes(mmap[80..88].try_into().unwrap()) as usize
+        } else {
+            0
+        };
 
         Ok(Self {
             mmap,
@@ -275,6 +308,7 @@ impl MmapIndex {
             avg_doc_length,
             num_terms,
             doc_lengths_offset,
+            pagerank_offset,
             doc_meta_index_offset,
             doc_meta_data_offset,
             terms_table_offset,
@@ -290,6 +324,26 @@ impl MmapIndex {
         }
         let off = self.doc_lengths_offset + (doc_id as usize) * 4;
         u32::from_le_bytes(self.mmap[off..off + 4].try_into().unwrap())
+    }
+
+    #[inline]
+    pub fn get_pagerank(&self, doc_id: u32) -> f64 {
+        if doc_id >= self.total_docs || self.pagerank_offset == 0 {
+            return if self.total_docs > 0 {
+                1.0 / (self.total_docs as f64)
+            } else {
+                0.0
+            };
+        }
+        let off = self.pagerank_offset + (doc_id as usize) * 8;
+        if off + 8 > self.mmap.len() {
+            return if self.total_docs > 0 {
+                1.0 / (self.total_docs as f64)
+            } else {
+                0.0
+            };
+        }
+        f64::from_le_bytes(self.mmap[off..off + 8].try_into().unwrap())
     }
 
     pub fn get_doc_meta(&self, doc_id: u32) -> Option<DocMetaRef<'_>> {
@@ -332,7 +386,14 @@ impl MmapIndex {
         pos += 2;
         let title = std::str::from_utf8(&slice[pos..pos + title_len]).ok()?;
 
-        Some(DocMetaRef { hex_id, url, title })
+        let pagerank = self.get_pagerank(doc_id);
+
+        Some(DocMetaRef {
+            hex_id,
+            url,
+            title,
+            pagerank,
+        })
     }
 
     #[inline]
@@ -797,6 +858,7 @@ pub struct SearchParams {
     pub q: Option<String>,
     pub page: Option<usize>,
     pub limit: Option<usize>,
+    pub alpha: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -810,6 +872,8 @@ pub struct SearchHit {
     pub rank: usize,
     pub doc_id: String,
     pub score: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pagerank: Option<f64>,
     pub title: String,
     pub url: String,
     pub snippet: String,
@@ -987,8 +1051,21 @@ async fn suggest_handler(
 }
 
 // ============================================================================
-// BM25 Scoring Formulas
+// PageRank & BM25 Scoring Formulas
 // ============================================================================
+
+pub const DEFAULT_ALPHA: f64 = 0.7;
+pub const DEFAULT_EPSILON: f64 = 1e-6;
+
+#[inline]
+pub fn final_score(bm25_score: f64, pagerank: f64, alpha: f64, epsilon: f64) -> f64 {
+    alpha * bm25_score + (1.0 - alpha) * (pagerank + epsilon).ln()
+}
+
+#[inline]
+pub fn compute_final_score(bm25_score: f64, pagerank: f64, alpha: f64, epsilon: f64) -> f64 {
+    final_score(bm25_score, pagerank, alpha, epsilon)
+}
 
 #[inline]
 pub fn bm25_idf(total_docs: f64, doc_freq: f64) -> f64 {
@@ -1087,7 +1164,18 @@ async fn search_handler(
         }
     }
 
-    let mut ranked: Vec<(u32, f64)> = scores.into_iter().collect();
+    let alpha = params.alpha.unwrap_or(DEFAULT_ALPHA).clamp(0.0, 1.0);
+    let epsilon = DEFAULT_EPSILON;
+
+    let mut ranked: Vec<(u32, f64)> = scores
+        .into_iter()
+        .map(|(doc_id, bm25)| {
+            let pr = state.index.get_pagerank(doc_id);
+            let score = final_score(bm25, pr, alpha, epsilon);
+            (doc_id, score)
+        })
+        .collect();
+
     ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     let total_hits = ranked.len();
@@ -1136,6 +1224,7 @@ async fn search_handler(
                 rank: offset + rank_idx + 1,
                 doc_id: meta.hex_id.to_string(),
                 score: (score * 10000.0).round() / 10000.0,
+                pagerank: Some((meta.pagerank * 1_000_000.0).round() / 1_000_000.0),
                 title: meta.title.to_string(),
                 url: meta.url.to_string(),
                 snippet,
@@ -1341,5 +1430,32 @@ mod tests {
             bm25_idf(total_docs, doc_freq) * bm25_tf_weight(tf, doc_len, avg_doc_len, k1, b);
         assert_eq!(score, expected);
         assert!(score > 0.0);
+    }
+
+    // ------------------------------------------------------------------------
+    // FinalScore Combined Ranking Tests
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn test_final_score_computation() {
+        let bm25: f64 = 6.0;
+        let pr: f64 = 0.04;
+        let alpha: f64 = 0.7;
+        let epsilon: f64 = 1e-6;
+
+        let expected = alpha * bm25 + (1.0 - alpha) * (pr + epsilon).ln();
+        let computed = final_score(bm25, pr, alpha, epsilon);
+
+        assert!((computed - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_final_score_alpha_extremes() {
+        let bm25: f64 = 4.2;
+        let pr: f64 = 0.01;
+        let epsilon: f64 = 1e-6;
+
+        assert!((final_score(bm25, pr, 1.0, epsilon) - bm25).abs() < 1e-10);
+        assert!((final_score(bm25, pr, 0.0, epsilon) - (pr + epsilon).ln()).abs() < 1e-10);
     }
 }
