@@ -3,18 +3,18 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
+    Json,
     extract::{Query, State},
     http::StatusCode,
     response::{Html, IntoResponse},
-    Json,
 };
 
 use crate::api::state::{
     AppState, HealthResponse, SearchHit, SearchParams, SearchResponse, SuggestParams,
 };
 use crate::ranking::{
-    bm25_idf, bm25_tf_weight, final_score, generate_dynamic_snippet, parse_query, phrase_matches,
-    ScoredDoc, WandPostingCursor, DEFAULT_ALPHA, DEFAULT_EPSILON,
+    DEFAULT_ALPHA, DEFAULT_EPSILON, ScoredDoc, WandPostingCursor, bm25_idf, bm25_tf_weight,
+    final_score, generate_dynamic_snippet, parse_query, phrase_matches,
 };
 use crate::storage::PostingsIterator;
 

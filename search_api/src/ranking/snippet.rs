@@ -1,6 +1,10 @@
 use aho_corasick::AhoCorasick;
 
-pub fn generate_dynamic_snippet(content: &str, query_terms: &[String], target_len: usize) -> String {
+pub fn generate_dynamic_snippet(
+    content: &str,
+    query_terms: &[String],
+    target_len: usize,
+) -> String {
     if content.is_empty() {
         return String::new();
     }

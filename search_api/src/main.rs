@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use api::{create_router, AppState};
+use api::{AppState, create_router};
 use storage::{MmapDocStore, MmapIndex, TermDictionary};
 use tokenizer::TokenizerPipeline;
 

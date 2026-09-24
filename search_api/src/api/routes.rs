@@ -1,5 +1,5 @@
+use axum::{Router, routing::get};
 use std::sync::Arc;
-use axum::{routing::get, Router};
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::api::handlers::{health_handler, search_handler, suggest_handler, ui_handler};

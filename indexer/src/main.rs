@@ -65,11 +65,11 @@ use std::path::Path;
 use std::time::Instant;
 
 use ranking::{
-    compute_pagerank, search_combined_mmap, PageRankConfig, DEFAULT_ALPHA, DEFAULT_EPSILON,
+    DEFAULT_ALPHA, DEFAULT_EPSILON, PageRankConfig, compute_pagerank, search_combined_mmap,
 };
 use storage::{
-    convert_json_to_bin_if_needed, BinaryIndexWriter, DocMetadata, IndexStore, MmapDocStore,
-    MmapIndex, Posting, TermDictionary,
+    BinaryIndexWriter, DocMetadata, IndexStore, MmapDocStore, MmapIndex, Posting, TermDictionary,
+    convert_json_to_bin_if_needed,
 };
 use tokenizer::TokenizerPipeline;
 

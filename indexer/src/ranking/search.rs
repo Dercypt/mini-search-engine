@@ -1,7 +1,7 @@
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use crate::ranking::bm25::{
-    bm25_idf, bm25_tf_weight, final_score, parse_query, phrase_matches, DEFAULT_EPSILON,
+    DEFAULT_EPSILON, bm25_idf, bm25_tf_weight, final_score, parse_query, phrase_matches,
 };
 use crate::ranking::wand::{ScoredDoc, WandPostingCursor};
 use crate::storage::mmap::{DocMetaRef, MmapIndex, TermDictionary};

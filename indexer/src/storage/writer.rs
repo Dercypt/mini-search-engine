@@ -1,5 +1,5 @@
 use crate::storage::mmap::TermEntry;
-use crate::storage::vbyte::{encode_postings, Posting};
+use crate::storage::vbyte::{Posting, encode_postings};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
