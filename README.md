@@ -111,5 +111,75 @@ search_api/   Zero-allocation mmap BM25 ranker + Axum web interface
 
 ---
 
+## Indexing Architecture: Batch vs. Segment-Based (Lucene & Tantivy)
+
+### Current Architecture: Offline Batch Processing
+In this project, indexing is implemented as an **offline batch pipeline**:
+1. **Raw Document Store:** The crawler sequentially downloads documents into `documents.bin`.
+2. **Monolithic Index Build:** The indexer loads all documents into memory, computes a global PageRank pass, delta-encodes and VByte-compresses postings, and writes monolithic artifacts (`index.bin` and `dictionary.fst`).
+3. **Static Mmap Serving:** The search API memory-maps these artifacts read-only for sub-millisecond BM25 querying.
+
+**Limitations of Offline Batch Indexing:**
+* **Stop-the-World Updates:** Inserting, modifying, or deleting a document requires re-processing the entire corpus ($O(N)$ re-indexing cost).
+* **Stale Search Results:** Documents are not searchable until the entire batch indexing pipeline finishes.
+* **In-Place Mutation Overhead:** Compressed, delta-encoded postings lists cannot be easily mutated in-place on disk without expensive offset shifting and fragmentation.
+
+---
+
+### Modern Engine Architecture (Lucene, Tantivy): Immutable Segments & Merges
+
+Modern production search engines like **Apache Lucene** and **Tantivy** address incremental updates by adopting an **LSM-tree (Log-Structured Merge-Tree)** inspired segment architecture:
+
+```
+                  +----------------------------------+
+                  |    Incoming Documents (CRUD)     |
+                  +----------------------------------+
+                                   |
+                                   v
+             +---------------------------------------------+
+             | In-Memory Buffer (MemTable / SegmentWriter) |
+             +---------------------------------------------+
+                                   |
+                     flush threshold (size / time)
+                                   v
+    +---------------------------------------------------------------+
+    |                      Immutable Segments                       |
+    |  +---------------+   +---------------+   +---------------+    |
+    |  |   Segment 1   |   |   Segment 2   |   |   Segment 3   |    |
+    |  | - Postings    |   | - Postings    |   | - Postings    |    |
+    |  | - FST Lexicon |   | - FST Lexicon |   | - FST Lexicon |    |
+    |  | - Del Bitset  |   | - Del Bitset  |   | - Del Bitset  |    |
+    |  +---------------+   +---------------+   +---------------+    |
+    +---------------------------------------------------------------+
+                                   |
+                        background merge policy
+                                   v
+    +---------------------------------------------------------------+
+    |              Merged Segment (Purged Tombstones)               |
+    |  +---------------------------------------------------------+  |
+    |  |                       Segment 1+2                       |  |
+    |  +---------------------------------------------------------+  |
+    +---------------------------------------------------------------+
+```
+
+#### 1. In-Memory Buffers & Segment Flushing
+* **RAM Buffers (`SegmentWriter`):** Incoming documents are indexed into an in-memory buffer (`DocumentsWriterPerThread` in Lucene, `SegmentWriter` in Tantivy) and appended to a Write-Ahead Log (WAL) for crash resilience.
+* **Immutable Flush:** Once the memory buffer reaches a threshold (e.g. 128MB–512MB) or an explicit flush occurs, it is serialized to disk as an **immutable segment**. Each segment is a fully self-contained mini-index with its own postings, term dictionary (FST or block-indexed), and stored fields.
+* **Concurrent Lock-Free Reads:** Because written segments are strictly immutable:
+  - Search threads query segments concurrently via `mmap` without read-write locking contention.
+  - OS page cache pages remain warm without invalidation storms.
+
+#### 2. Tombstone-Based Updates and Deletions
+* **Append-Only Semantics:** Rather than mutating postings in place, an update is executed as a logical `Delete(doc_id)` followed by an `Insert(new_doc)`.
+* **Deletion Bitmaps (Tombstones):** Deleted document IDs are marked in a lightweight bitset (e.g., Roaring Bitmaps or Tantivy `.del` files).
+* **Query-Time Masking:** Postings iterators check matches against the segment's deletion bitmap, transparently filtering out deleted documents during BM25 evaluation.
+
+#### 3. Background Segments Merging (Compaction)
+* **Merge Policies (Tiered / Log-Merge):** As incremental flushes create numerous small segments, search latency and file handle usage increase ($O(S)$ search cost across $S$ segments). A background merge policy (e.g., Lucene's `TieredMergePolicy` or Tantivy's `LogMergePolicy`) continually identifies segments of comparable size tiers.
+* **Multi-Way Stream Merging:** Merging performs a k-way merge of sorted postings streams, reassigns internal document IDs, and physically purges tombstoned documents to reclaim storage.
+* **Atomic Snapshot Swapping:** Once the merged segment is finalized, the index metadata is updated atomically via a commit point. Active queries continue reading older segments until their cursors finish, after which obsolete segment files are safely unlinked.
+
+---
+
 ## License
 [MIT](LICENSE)
