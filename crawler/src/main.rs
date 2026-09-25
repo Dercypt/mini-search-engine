@@ -1,3 +1,4 @@
+use clap::Parser;
 use fastbloom::BloomFilter;
 use regex::Regex;
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
@@ -7,12 +8,57 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio::time::sleep;
 use url::Url;
+
+/// Configurable command-line arguments for the concurrent crawler.
+#[derive(Parser, Debug, Clone)]
+#[command(author, version, about = "High-performance Wikipedia crawler for mini search engine", long_about = None)]
+pub struct Args {
+    /// Maximum number of pages to crawl
+    #[arg(short = 'm', long = "max-pages", default_value_t = 1000)]
+    pub max_pages: usize,
+
+    /// Seed URL to begin crawling from
+    #[arg(
+        short = 's',
+        long = "seed",
+        default_value = "https://en.wikipedia.org/wiki/Search_engine"
+    )]
+    pub seed: String,
+
+    /// Output path for crawled documents (.bin / .json or base file path)
+    #[arg(short = 'o', long = "output", default_value = "documents.json")]
+    pub output: String,
+}
+
+pub fn resolve_output_paths<P: AsRef<Path>>(output: P) -> (PathBuf, PathBuf) {
+    let output_path = output.as_ref();
+    let output_str = output_path.to_string_lossy();
+    if output_path.is_dir() || output_str.ends_with('/') || output_str.ends_with('\\') {
+        (
+            output_path.join("documents.bin"),
+            output_path.join("documents.json"),
+        )
+    } else if output_path.extension().and_then(|s| s.to_str()) == Some("bin") {
+        (
+            output_path.to_path_buf(),
+            output_path.with_extension("json"),
+        )
+    } else if output_path.extension().and_then(|s| s.to_str()) == Some("json") {
+        (output_path.with_extension("bin"), output_path.to_path_buf())
+    } else {
+        (
+            PathBuf::from(format!("{}.bin", output_str)),
+            PathBuf::from(format!("{}.json", output_str)),
+        )
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Document {
@@ -136,8 +182,17 @@ impl DocStoreWriter {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let max_pages = 1000;
-    let seed_url = "https://en.wikipedia.org/wiki/Search_engine".to_string();
+    let args = Args::parse();
+    let max_pages = args.max_pages;
+    let seed_url = args.seed;
+
+    let (bin_path, json_path) = resolve_output_paths(&args.output);
+    if let Some(parent) = bin_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Some(parent) = json_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        let _ = std::fs::create_dir_all(parent);
+    }
 
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let (doc_tx, mut doc_rx) = mpsc::channel::<Document>(100);
@@ -179,13 +234,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_pages
     );
 
+    let bin_path_writer = bin_path.clone();
+    let json_path_writer = json_path.clone();
+
     // Dedicated background writer task: streams docs to disk with low memory footprint
     let writer_handle = tokio::spawn(async move {
-        let mut bin_writer =
-            DocStoreWriter::create("documents.bin").expect("failed to create documents.bin");
-        let mut json_writer = BufWriter::new(
-            File::create("documents.json").expect("failed to create documents.json"),
-        );
+        let mut bin_writer = DocStoreWriter::create(&bin_path_writer)
+            .unwrap_or_else(|e| panic!("failed to create {}: {}", bin_path_writer.display(), e));
+        let mut json_writer =
+            BufWriter::new(File::create(&json_path_writer).unwrap_or_else(|e| {
+                panic!("failed to create {}: {}", json_path_writer.display(), e)
+            }));
         json_writer
             .write_all(b"[\n")
             .expect("failed to write json header");
@@ -194,7 +253,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         while let Some(doc) = doc_rx.recv().await {
             bin_writer
                 .append(&doc.id, &doc.url, &doc.title, &doc.content, &doc.links)
-                .expect("failed to append to documents.bin");
+                .unwrap_or_else(|e| {
+                    panic!("failed to append to {}: {}", bin_path_writer.display(), e)
+                });
 
             if !first {
                 json_writer
@@ -212,7 +273,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .write_all(b"\n]\n")
             .expect("failed to write json footer");
         json_writer.flush().expect("failed to flush json");
-        bin_writer.finish().expect("failed to finish documents.bin")
+        bin_writer
+            .finish()
+            .unwrap_or_else(|e| panic!("failed to finish {}: {}", bin_path_writer.display(), e))
     });
 
     while let Some(current_url) = rx.recv().await {
@@ -323,8 +386,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total_saved = writer_handle.await?;
 
     println!(
-        "\nDone! Streamed and saved {} documents to documents.bin and documents.json",
-        total_saved
+        "\nDone! Streamed and saved {} documents to {} and {}",
+        total_saved,
+        bin_path.display(),
+        json_path.display()
     );
     Ok(())
 }
@@ -425,5 +490,73 @@ mod tests {
         // 6 bytes in hex = 12 hex characters
         assert_eq!(hash1.len(), 12);
         assert!(hash1.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_cli_args_defaults() {
+        let args = Args::try_parse_from(["crawler"]).expect("default args should parse");
+        assert_eq!(args.max_pages, 1000);
+        assert_eq!(args.seed, "https://en.wikipedia.org/wiki/Search_engine");
+        assert_eq!(args.output, "documents.json");
+    }
+
+    #[test]
+    fn test_cli_args_custom_long_flags() {
+        let args = Args::try_parse_from([
+            "crawler",
+            "--max-pages",
+            "50",
+            "--seed",
+            "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+            "--output",
+            "custom.json",
+        ])
+        .expect("custom long flags should parse");
+        assert_eq!(args.max_pages, 50);
+        assert_eq!(
+            args.seed,
+            "https://en.wikipedia.org/wiki/Rust_(programming_language)"
+        );
+        assert_eq!(args.output, "custom.json");
+    }
+
+    #[test]
+    fn test_cli_args_custom_short_flags() {
+        let args = Args::try_parse_from([
+            "crawler",
+            "-m",
+            "20",
+            "-s",
+            "https://en.wikipedia.org/wiki/Computer_science",
+            "-o",
+            "out.bin",
+        ])
+        .expect("short flags should parse");
+        assert_eq!(args.max_pages, 20);
+        assert_eq!(args.seed, "https://en.wikipedia.org/wiki/Computer_science");
+        assert_eq!(args.output, "out.bin");
+    }
+
+    #[test]
+    fn test_resolve_output_paths() {
+        // Default / JSON target
+        let (bin, json) = resolve_output_paths("documents.json");
+        assert_eq!(bin, PathBuf::from("documents.bin"));
+        assert_eq!(json, PathBuf::from("documents.json"));
+
+        // Binary target
+        let (bin, json) = resolve_output_paths("documents.bin");
+        assert_eq!(bin, PathBuf::from("documents.bin"));
+        assert_eq!(json, PathBuf::from("documents.json"));
+
+        // Base name target without extension
+        let (bin, json) = resolve_output_paths("crawl_results");
+        assert_eq!(bin, PathBuf::from("crawl_results.bin"));
+        assert_eq!(json, PathBuf::from("crawl_results.json"));
+
+        // Directory target
+        let (bin, json) = resolve_output_paths("output_dir/");
+        assert_eq!(bin, PathBuf::from("output_dir/documents.bin"));
+        assert_eq!(json, PathBuf::from("output_dir/documents.json"));
     }
 }
