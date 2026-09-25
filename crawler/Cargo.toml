@@ -14,3 +14,4 @@ sha2 = "0.10"
 hex = "0.4"
 regex = "1.10"
 fastbloom = "0.8"
+clap = { version = "4", features = ["derive"] }
