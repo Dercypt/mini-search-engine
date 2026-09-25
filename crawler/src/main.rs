@@ -1,7 +1,9 @@
 use clap::Parser;
 use fastbloom::BloomFilter;
-use regex::Regex;
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
+use robots_txt::Robots;
+use robots_txt::matcher::SimpleMatcher;
+use robots_txt::parts::rule::Rule;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -81,6 +83,62 @@ pub fn normalize_url(raw_url: &str) -> Option<String> {
     parsed.set_fragment(None);
     parsed.set_query(None);
     Some(parsed.to_string())
+}
+
+pub const BOT_USER_AGENT: &str =
+    "MiniSearchEngineBot/1.0 (+https://github.com/Dercypt/mini-search-engine)";
+pub const BOT_NAME: &str = "MiniSearchEngineBot";
+
+/// Parses raw robots.txt content using the robots_txt crate and creates a matcher for the given bot.
+pub fn parse_robots_txt(content: &str, bot_name: &str) -> SimpleMatcher<'static> {
+    let leaked_content: &'static str = Box::leak(content.to_string().into_boxed_str());
+    let robots = Robots::from_str_lossy(leaked_content);
+    let section = robots.choose_section(bot_name);
+    let rules: &'static [Rule<'static>] = Box::leak(section.rules.clone().into_boxed_slice());
+    SimpleMatcher::new(rules)
+}
+
+/// Resolves robots.txt URL from seed URL and fetches compliance rules from the target server.
+pub async fn fetch_and_parse_robots(
+    client: &reqwest::Client,
+    seed_url: &str,
+    bot_name: &str,
+) -> SimpleMatcher<'static> {
+    let robots_url = match Url::parse(seed_url) {
+        Ok(parsed) => {
+            let scheme = parsed.scheme();
+            let host = parsed.host_str().unwrap_or("en.wikipedia.org");
+            let port_str = parsed.port().map(|p| format!(":{}", p)).unwrap_or_default();
+            format!("{}://{}{}/robots.txt", scheme, host, port_str)
+        }
+        Err(_) => "https://en.wikipedia.org/robots.txt".to_string(),
+    };
+
+    println!("Fetching and parsing robots.txt from {}...", robots_url);
+    match client.get(&robots_url).send().await {
+        Ok(res) if res.status().is_success() => match res.text().await {
+            Ok(body) => {
+                let matcher = parse_robots_txt(&body, bot_name);
+                println!("Successfully parsed robots.txt rules.");
+                matcher
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to read robots.txt body: {e}. Defaulting to allow all.");
+                SimpleMatcher::GlobalRule(true)
+            }
+        },
+        Ok(res) => {
+            println!(
+                "Notice: robots.txt returned status {}, defaulting to allow all.",
+                res.status()
+            );
+            SimpleMatcher::GlobalRule(true)
+        }
+        Err(e) => {
+            eprintln!("Warning: Failed to fetch robots.txt: {e}. Defaulting to allow all.");
+            SimpleMatcher::GlobalRule(true)
+        }
+    }
 }
 
 // ============================================================================
@@ -203,25 +261,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let doc_count = Arc::new(AtomicUsize::new(0));
     let semaphore = Arc::new(Semaphore::new(5));
 
-    let disallowed_patterns = vec![
-        Regex::new(r"(?i)/w/index\.php").unwrap(),
-        Regex::new(r"(?i)/wiki/(Special|Talk|User|Wikipedia|File|MediaWiki|Template|Template_talk|Help|Portal|Category):").unwrap(),
-        Regex::new(r"(?i)\?(action|printable|useskin)=").unwrap(),
-    ];
-    let disallowed = Arc::new(disallowed_patterns);
-
     let mut headers = HeaderMap::new();
-    headers.insert(
-        USER_AGENT,
-        HeaderValue::from_static(
-            "MiniSearchEngineBot/1.0 (+https://github.com/Dercypt/mini-search-engine)",
-        ),
-    );
+    headers.insert(USER_AGENT, HeaderValue::from_static(BOT_USER_AGENT));
 
     let client = reqwest::Client::builder()
         .default_headers(headers)
         .timeout(Duration::from_secs(10))
         .build()?;
+
+    let robots_matcher = Arc::new(fetch_and_parse_robots(&client, &seed_url, BOT_NAME).await);
+
+    let seed_parsed = Url::parse(&seed_url).ok();
+    let seed_host = seed_parsed
+        .as_ref()
+        .and_then(|u| u.host_str())
+        .unwrap_or("en.wikipedia.org")
+        .to_string();
+    let base_url = Arc::new(
+        Url::parse(&format!("https://{}", seed_host))
+            .unwrap_or_else(|_| Url::parse("https://en.wikipedia.org").unwrap()),
+    );
+
+    if let Some(parsed) = &seed_parsed {
+        let path_and_query = &parsed[url::Position::BeforePath..url::Position::AfterQuery];
+        if !robots_matcher.check_path(path_and_query) {
+            eprintln!(
+                "Warning: Seed URL {} is disallowed by robots.txt!",
+                seed_url
+            );
+        }
+    }
 
     {
         let mut bloom = bloom_filter.lock().await;
@@ -290,7 +359,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let bloom_filter = bloom_filter.clone();
         let doc_tx = doc_tx.clone();
         let doc_count = doc_count.clone();
-        let disallowed = disallowed.clone();
+        let robots_matcher = robots_matcher.clone();
+        let base_url = base_url.clone();
+        let seed_host = seed_host.clone();
 
         tokio::spawn(async move {
             let _permit = permit;
@@ -334,15 +405,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let content = content_pieces.join(" ");
 
                 let mut outgoing_set = HashSet::new();
-                let base_url = Url::parse("https://en.wikipedia.org").unwrap();
 
                 for element in document.select(&link_selector) {
                     if let Some(href) = element.value().attr("href")
                         && let Ok(resolved) = base_url.join(href)
-                        && resolved.host_str() == Some("en.wikipedia.org")
+                        && resolved.host_str() == Some(&seed_host)
+                        && robots_matcher.check_path(
+                            &resolved[url::Position::BeforePath..url::Position::AfterQuery],
+                        )
                         && let Some(normalized) = normalize_url(resolved.as_str())
                         && normalized != current_url
-                        && !disallowed.iter().any(|re| re.is_match(&normalized))
                     {
                         outgoing_set.insert(normalized);
                     }
@@ -558,5 +630,65 @@ mod tests {
         let (bin, json) = resolve_output_paths("output_dir/");
         assert_eq!(bin, PathBuf::from("output_dir/documents.bin"));
         assert_eq!(json, PathBuf::from("output_dir/documents.json"));
+    }
+
+    #[test]
+    fn test_parse_robots_txt_wikipedia_rules() {
+        let robots_content = r#"
+# robots.txt snippet for test
+User-agent: *
+Allow: /w/api.php?action=mobileview&
+Allow: /w/load.php?
+Disallow: /w/
+Disallow: /api/
+Disallow: /trap/
+Disallow: /wiki/Special:
+Disallow: /wiki/Wikipedia:
+"#;
+        let matcher = parse_robots_txt(robots_content, BOT_NAME);
+
+        // Allowed article pages
+        assert!(matcher.check_path("/wiki/Search_engine"));
+        assert!(matcher.check_path("/wiki/Rust_(programming_language)"));
+        assert!(matcher.check_path("/wiki/Computer_science"));
+
+        // Disallowed administrative and internal paths
+        assert!(!matcher.check_path("/w/index.php"));
+        assert!(!matcher.check_path("/w/index.php?title=Search_engine&action=edit"));
+        assert!(!matcher.check_path("/wiki/Special:RecentChanges"));
+        assert!(!matcher.check_path("/wiki/Wikipedia:About"));
+        assert!(!matcher.check_path("/trap/honeypot"));
+        assert!(!matcher.check_path("/api/rest_v1"));
+
+        // Allowed specific subpaths matching Allow rules before Disallow: /w/
+        assert!(matcher.check_path("/w/load.php?modules=site"));
+    }
+
+    #[test]
+    fn test_parse_robots_txt_bot_specific_override() {
+        let robots_content = r#"
+User-agent: MiniSearchEngineBot
+Allow: /admin/public/
+Disallow: /admin/
+
+User-agent: *
+Disallow: /
+"#;
+        let matcher = parse_robots_txt(robots_content, BOT_NAME);
+        assert!(!matcher.check_path("/admin/private"));
+        assert!(matcher.check_path("/admin/public/info"));
+        // MiniSearchEngineBot does not inherit User-agent: * Disallow: /
+        assert!(matcher.check_path("/public/article"));
+
+        // Another bot matches the default User-agent: *
+        let other_matcher = parse_robots_txt(robots_content, "OtherBot");
+        assert!(!other_matcher.check_path("/public/article"));
+    }
+
+    #[test]
+    fn test_parse_robots_txt_empty_and_fallback() {
+        let empty_matcher = parse_robots_txt("", BOT_NAME);
+        assert!(empty_matcher.check_path("/any/page"));
+        assert!(empty_matcher.check_path("/w/index.php"));
     }
 }
