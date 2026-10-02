@@ -181,5 +181,31 @@ Modern production search engines like **Apache Lucene** and **Tantivy** address 
 
 ---
 
+## Verification & Testing
+
+To verify code formatting, static analysis (clippy), and all unit and integration test suites across all three crates in a single step, run the verification harness:
+
+```bash
+./verify.sh
+```
+
+The pipeline executes in 4 stages:
+1. **Formatting**: `cargo fmt --check` across `crawler`, `indexer`, and `search_api`.
+2. **Linting**: `cargo clippy -- -D warnings` with zero allowed warnings.
+3. **Unit & Integration Tests**: `cargo test` across all crates.
+4. **Law Invariant Tests**: Verification against non-negotiable system laws defined in `LAWS.md`.
+
+---
+
+## System Governance & Invariants
+
+This repository enforces strict system invariants and engineering protocols:
+* **[System Laws](LAWS.md):** Non-negotiable domain invariants including binary storage headers (`MSEDOC01`, `MSEIDX01`), posting list monotonicity, finite non-negative BM25 relevance scores, and API contract guarantees.
+* **[Engineering Principles](PRINCIPLES.md):** Architectural defaults, escalation triggers (crate dependencies, API contracts, binary schemas), explicit typed domain errors, and strict type safety.
+* **[Verification Harness](HARNESS.md):** Quality pipeline specification and 15-iteration autonomous resolution mandate.
+* **[Agent Governance](AGENTS.md):** Operating instructions, phase execution loop, and verification rules for AI coding assistants.
+
+---
+
 ## License
 [MIT](LICENSE)
