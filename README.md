@@ -1,80 +1,157 @@
 # Mini Search Engine
-A lightweight, from-scratch search engine built in Rust. Features an asynchronous crawler, an in-memory inverted index, and sub-millisecond retrieval ranked via Okapi BM25.
+
+A fast, lightweight, from-scratch search engine built in Rust. Features an asynchronous web crawler, a zero-deserialization memory-mapped binary inverted index, and sub-millisecond full-text retrieval ranked with Okapi BM25, PageRank, and WAND dynamic pruning.
 
 [Live Demo](https://mini-search-engine-ijmt.onrender.com/)
 
 ---
 
-## Features
-* **Async Crawler:** Concurrent web scraper powered by `tokio` and `reqwest` with streaming binary disk output.
-* **Memory-Mapped Inverted Index (mmap):** Zero-deserialization binary inverted index powered by `memmap2`.
-* **VByte Compressed Binary Postings:** Delta-encoded postings lists compressed with Variable Byte (VByte) encoding.
-* **FST Lexicon:** Fast finite-state transducer dictionary (`fst::Map`) for prefix suggestions and Levenshtein fuzzy search.
-* **BM25 Ranking:** Relevance scoring ($k_1 = 1.5, b = 0.75$) evaluated directly from memory-mapped postings.
-* **Zero RAM Choke:** Constant-memory streaming crawler and sub-microsecond random-access document reader scalable to 500,000+ pages.
-* **Embedded UI:** Single-binary web interface and JSON API served via `axum`.
-* **Fast Retrieval:** Sub-millisecond query latency directly against memory-mapped disk storage.
+## Key Highlights
+
+- **Zero-Deserialization Engine (`memmap2`)**: Postings and documents are queried directly from disk-backed memory maps without RAM deserialization overhead.
+- **VByte-Compressed Postings**: Postings lists are delta-encoded and compressed using Variable Byte (VByte) encoding for compact disk footprint and fast scanning.
+- **FST Lexicon**: Finite-state transducer dictionary (`fst::Map`) enabling sub-millisecond term lookups, prefix auto-suggestions, and typo-tolerant search.
+- **Hybrid Scoring**: Combines Okapi BM25 ($k_1 = 1.5, b = 0.75$) relevance with link-graph PageRank scores.
+- **WAND Dynamic Pruning**: Weak AND (WAND) top-$k$ candidate pruning algorithm avoids scoring non-competitive documents.
+- **Exact Phrase Matching**: Positional postings enable exact quoted phrase filtering (e.g. `"search engine"`).
+- **Asynchronous Crawler**: Concurrent Wikipedia crawler built with `tokio`, `reqwest`, robots.txt compliance, and bloom-filter deduplication.
+- **Embedded Web UI & REST API**: Single-binary web service with responsive search interface and JSON API served via `axum`.
+
+---
+
+## Architecture & Data Flow
+
+The project is split into three modular crates forming an offline-to-online retrieval pipeline:
+
+```
+[ Web / Wikipedia ]
+        │
+        ▼ (Asynchronous Web Crawler)
+   ┌─────────┐
+   │ crawler │  ──> documents.bin (MSEDOC01 binary document store)
+   └─────────┘
+        │
+        ▼ (Batch Indexer & Lexicon Builder)
+   ┌─────────┐  ──> index.bin (MSEIDX01 VByte inverted index + metadata)
+   │ indexer │  ──> dictionary.fst (FST term dictionary)
+   └─────────┘
+        │
+        ▼ (Memory-Mapped Retrieval Engine)
+ ┌──────────────┐
+ │  search_api  │  <── Serves Web UI & REST API on port 8080 (0 RAM choke)
+ └──────────────┘
+```
+
+### Components
+
+| Crate | Responsibility | Key Output / Role |
+|-------|----------------|-------------------|
+| [`crawler`](crawler/) | Asynchronously scrapes web pages with robots.txt parsing, HTML extraction, bloom-filter deduplication, and link graph collection. | `documents.bin` |
+| [`indexer`](indexer/) | Tokenizes raw documents, computes global PageRank via power iteration, delta-encodes positional postings, and serializes binary index files. | `index.bin`, `dictionary.fst` |
+| [`search_api`](search_api/) | Mmaps index files read-only, evaluates BM25/WAND queries, runs prefix auto-suggest, generates dynamic snippets, and hosts the web UI. | HTTP server (`:8080`) |
+
+### Binary Storage Formats
+
+- **`documents.bin` (`MSEDOC01`)**: 64-byte magic header, sequential document records (URL, title, body, links), and a trailing document offset table for $O(1)$ random lookups.
+- **`index.bin` (`MSEIDX01`)**: 128-byte magic header containing doc count, average document length, and 64-bit byte offsets pointing to doc lengths, PageRank scores, term metadata tables, and delta-compressed VByte posting blocks.
+- **`dictionary.fst`**: Monotonically sorted finite-state transducer mapping term strings directly to metadata byte offsets in `index.bin`.
+
+> **Architecture Note**: This engine uses an offline batch indexing model designed for maximum sequential compression and zero-copy mmap reads. Real-time incremental search engines typically expand on this using LSM segment flushes and background compaction merges (e.g., Lucene or Tantivy).
 
 ---
 
 ## Prerequisites
-* Rust 1.85+ (`rustc --version` with Edition 2024 support)
-* Docker & Docker Compose (optional, for Option 1)
+
+- **Rust 1.85+** (Edition 2024 support)
+- **Docker & Docker Compose** (optional)
 
 ---
 
 ## Quickstart
 
-### Option 1: With Docker
+### Option 1: One-Command Pipeline (Recommended)
+
+Run the end-to-end crawler, indexer, and search server with the provided script:
+
 ```bash
 git clone https://github.com/Dercypt/mini-search-engine.git
 cd mini-search-engine
-docker compose up --build
+./run_pipeline.sh
 ```
-Open `http://localhost:8080`.
 
-### Option 2: Manual Build
+Open `http://localhost:8080` in your browser.
+
+---
+
+### Option 2: Step-by-Step Manual Execution
+
 ```bash
-# 1. Scrape Wikipedia
-cd crawler && cargo run --release && cd ..
-# 2. Build inverted index
-cd indexer && cargo run --release && cd ..
-# 3. Serve API & Web UI
-cd search_api && cargo run --release
+# 1. Crawl pages (defaults to 1000 Wikipedia pages)
+cd crawler
+cargo run --release -- --max-pages 500 --seed "https://en.wikipedia.org/wiki/Search_engine"
+cd ..
+
+# 2. Build inverted index and FST dictionary
+cd indexer
+cargo run --release
+cd ..
+
+# 3. Start Search API & Web UI
+cd search_api
+cargo run --release
 ```
 
 ---
 
-## API
+### Option 3: Docker
+
+```bash
+docker compose up --build
+```
+
+Access the UI at `http://localhost:8080`.
+
+---
+
+## API Reference
+
+The `search_api` server provides the following HTTP endpoints:
+
+### 1. Search Query
 
 `GET /api/search`
 
-Search the in-memory index and return BM25-ranked results.
+Executes BM25 and PageRank retrieval with WAND dynamic pruning. Supports standard keyword queries and quoted exact-match phrases (e.g. `"search engine"`).
 
 **Query Parameters**
 
-| Param   | Type   | Required | Default | Description                  |
-|---------|--------|----------|---------|-------------------------------|
-| `q`     | string | yes      | —       | Search query                 |
-| `page`  | int    | no       | `1`     | Page number                  |
-| `limit` | int    | no       | `10`    | Results per page             |
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `q` | string | Yes | — | Search query (returns `400 Bad Request` if empty) |
+| `page` | integer | No | `1` | Page number for pagination |
+| `limit` | integer | No | `10` | Results per page (clamped 1–100) |
+| `alpha` | float | No | `0.85` | Score blend between BM25 (`1.0`) and PageRank (`0.0`) |
 
 **Example Request**
 ```bash
-curl "http://localhost:8080/api/search?q=rust&page=1&limit=10"
+curl "http://localhost:8080/api/search?q=rust+programming&page=1&limit=5"
 ```
 
 **Example Response**
 ```json
 {
-  "total_hits": 18,
+  "query": "rust programming",
+  "total_hits": 24,
   "page": 1,
-  "total_pages": 2,
-  "execution_time_ms": "0.38",
+  "limit": 5,
+  "total_pages": 5,
+  "execution_time_ms": 0.38,
   "results": [
     {
       "rank": 1,
-      "score": "6.4210",
+      "doc_id": "12",
+      "score": 6.421,
+      "pagerank": 0.00185,
       "title": "Rust (programming language)",
       "url": "https://en.wikipedia.org/wiki/Rust_(programming_language)",
       "snippet": "A systems programming language focused on memory safety and performance..."
@@ -83,129 +160,111 @@ curl "http://localhost:8080/api/search?q=rust&page=1&limit=10"
 }
 ```
 
-**Response Fields**
-
-| Field | Type | Description |
-|---|---|---|
-| `total_hits` | integer | Total matching documents in the index |
-| `page` | integer | Current page number |
-| `total_pages` | integer | Total available pages based on `limit` |
-| `execution_time_ms` | string / float | Query execution time in milliseconds |
-| `results` | array | List of matched document objects |
-| `results[].rank` | integer | Position rank in query results |
-| `results[].score` | string / float | BM25 relevance score (higher = more relevant) |
-| `results[].title` | string | Page title |
-| `results[].url` | string | Source Wikipedia URL |
-| `results[].snippet` | string | Extracted body preview |
-
-If `q` is missing, the API returns `400 Bad Request`.
-
 ---
 
-## Architecture
+### 2. Auto-Suggest / Prefix Lookup
+
+`GET /api/suggest`
+
+Returns term completions from the FST dictionary matching a prefix.
+
+**Query Parameters**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `q` | string | Yes | — | Prefix string to match |
+| `limit` | integer | No | `5` | Maximum suggestions (clamped 1–20) |
+
+**Example Request**
 ```bash
-crawler/      Scrapes Wikipedia articles -> documents.bin (mmap-ready binary store)
-indexer/      Parses documents and builds -> index.bin (VByte postings) + dictionary.fst
-search_api/   Zero-allocation mmap BM25 ranker + Axum web interface
+curl "http://localhost:8080/api/suggest?q=algo&limit=3"
+```
+
+**Example Response**
+```json
+[
+  "algorithm",
+  "algorithmic",
+  "algorithms"
+]
 ```
 
 ---
 
-## Indexing Architecture: Batch vs. Segment-Based (Lucene & Tantivy)
+### 3. Service Health
 
-### Current Architecture: Offline Batch Processing
-In this project, indexing is implemented as an **offline batch pipeline**:
-1. **Raw Document Store:** The crawler sequentially downloads documents into `documents.bin`.
-2. **Monolithic Index Build:** The indexer loads all documents into memory, computes a global PageRank pass, delta-encodes and VByte-compresses postings, and writes monolithic artifacts (`index.bin` and `dictionary.fst`).
-3. **Static Mmap Serving:** The search API memory-maps these artifacts read-only for sub-millisecond BM25 querying.
+`GET /health`
 
-**Limitations of Offline Batch Indexing:**
-* **Stop-the-World Updates:** Inserting, modifying, or deleting a document requires re-processing the entire corpus ($O(N)$ re-indexing cost).
-* **Stale Search Results:** Documents are not searchable until the entire batch indexing pipeline finishes.
-* **In-Place Mutation Overhead:** Compressed, delta-encoded postings lists cannot be easily mutated in-place on disk without expensive offset shifting and fragmentation.
+Returns service health, indexed document count, and vocabulary size.
+
+**Example Request**
+```bash
+curl "http://localhost:8080/health"
+```
+
+**Example Response**
+```json
+{
+  "status": "healthy",
+  "total_documents": 500,
+  "vocabulary_size": 18450
+}
+```
 
 ---
 
-### Modern Engine Architecture (Lucene, Tantivy): Immutable Segments & Merges
+## Configuration & CLI Options
 
-Modern production search engines like **Apache Lucene** and **Tantivy** address incremental updates by adopting an **LSM-tree (Log-Structured Merge-Tree)** inspired segment architecture:
+### Crawler (`crawler`)
 
-```
-                  +----------------------------------+
-                  |    Incoming Documents (CRUD)     |
-                  +----------------------------------+
-                                   |
-                                   v
-             +---------------------------------------------+
-             | In-Memory Buffer (MemTable / SegmentWriter) |
-             +---------------------------------------------+
-                                   |
-                     flush threshold (size / time)
-                                   v
-    +---------------------------------------------------------------+
-    |                      Immutable Segments                       |
-    |  +---------------+   +---------------+   +---------------+    |
-    |  |   Segment 1   |   |   Segment 2   |   |   Segment 3   |    |
-    |  | - Postings    |   | - Postings    |   | - Postings    |    |
-    |  | - FST Lexicon |   | - FST Lexicon |   | - FST Lexicon |    |
-    |  | - Del Bitset  |   | - Del Bitset  |   | - Del Bitset  |    |
-    |  +---------------+   +---------------+   +---------------+    |
-    +---------------------------------------------------------------+
-                                   |
-                        background merge policy
-                                   v
-    +---------------------------------------------------------------+
-    |              Merged Segment (Purged Tombstones)               |
-    |  +---------------------------------------------------------+  |
-    |  |                       Segment 1+2                       |  |
-    |  +---------------------------------------------------------+  |
-    +---------------------------------------------------------------+
+```bash
+cargo run --release -- [OPTIONS]
 ```
 
-#### 1. In-Memory Buffers & Segment Flushing
-* **RAM Buffers (`SegmentWriter`):** Incoming documents are indexed into an in-memory buffer (`DocumentsWriterPerThread` in Lucene, `SegmentWriter` in Tantivy) and appended to a Write-Ahead Log (WAL) for crash resilience.
-* **Immutable Flush:** Once the memory buffer reaches a threshold (e.g. 128MB–512MB) or an explicit flush occurs, it is serialized to disk as an **immutable segment**. Each segment is a fully self-contained mini-index with its own postings, term dictionary (FST or block-indexed), and stored fields.
-* **Concurrent Lock-Free Reads:** Because written segments are strictly immutable:
-  - Search threads query segments concurrently via `mmap` without read-write locking contention.
-  - OS page cache pages remain warm without invalidation storms.
+| Flag | Option | Default | Description |
+|------|--------|---------|-------------|
+| `-m` | `--max-pages` | `1000` | Target page limit |
+| `-s` | `--seed` | Wikipedia Search engine | Starting seed URL |
+| `-o` | `--output` | `documents.json` | Base path for `.bin` and `.json` outputs |
 
-#### 2. Tombstone-Based Updates and Deletions
-* **Append-Only Semantics:** Rather than mutating postings in place, an update is executed as a logical `Delete(doc_id)` followed by an `Insert(new_doc)`.
-* **Deletion Bitmaps (Tombstones):** Deleted document IDs are marked in a lightweight bitset (e.g., Roaring Bitmaps or Tantivy `.del` files).
-* **Query-Time Masking:** Postings iterators check matches against the segment's deletion bitmap, transparently filtering out deleted documents during BM25 evaluation.
+### Search API (`search_api`)
 
-#### 3. Background Segments Merging (Compaction)
-* **Merge Policies (Tiered / Log-Merge):** As incremental flushes create numerous small segments, search latency and file handle usage increase ($O(S)$ search cost across $S$ segments). A background merge policy (e.g., Lucene's `TieredMergePolicy` or Tantivy's `LogMergePolicy`) continually identifies segments of comparable size tiers.
-* **Multi-Way Stream Merging:** Merging performs a k-way merge of sorted postings streams, reassigns internal document IDs, and physically purges tombstoned documents to reclaim storage.
-* **Atomic Snapshot Swapping:** Once the merged segment is finalized, the index metadata is updated atomically via a commit point. Active queries continue reading older segments until their cursors finish, after which obsolete segment files are safely unlinked.
+Configurable via environment variables:
+
+| Variable | Default Fallback Paths | Description |
+|----------|------------------------|-------------|
+| `INDEX_PATH` | `../indexer/index.bin`, `index.bin`, `/app/index.bin` | Inverted index path |
+| `DOCS_PATH` | `../crawler/documents.bin`, `documents.bin`, `/app/documents.bin` | Document store path |
+| `FST_PATH` | `../indexer/dictionary.fst`, `dictionary.fst`, `/app/dictionary.fst` | FST dictionary path |
 
 ---
 
 ## Verification & Testing
 
-To verify code formatting, static analysis (clippy), and all unit and integration test suites across all three crates in a single step, run the verification harness:
+Verify code style, lints, and test suites across all crates in one step:
 
 ```bash
 ./verify.sh
 ```
 
-The pipeline executes in 4 stages:
+The verification pipeline executes:
 1. **Formatting**: `cargo fmt --check` across `crawler`, `indexer`, and `search_api`.
-2. **Linting**: `cargo clippy -- -D warnings` with zero allowed warnings.
+2. **Static Analysis**: `cargo clippy -- -D warnings` with zero allowed warnings.
 3. **Unit & Integration Tests**: `cargo test` across all crates.
-4. **Law Invariant Tests**: Verification against non-negotiable system laws defined in `LAWS.md`.
+4. **Law Verification**: Invariant tests validating system laws defined in [`LAWS.md`](LAWS.md).
 
 ---
 
-## System Governance & Invariants
+## Governance & System Invariants
 
-This repository enforces strict system invariants and engineering protocols:
-* **[System Laws](LAWS.md):** Non-negotiable domain invariants including binary storage headers (`MSEDOC01`, `MSEIDX01`), posting list monotonicity, finite non-negative BM25 relevance scores, and API contract guarantees.
-* **[Engineering Principles](PRINCIPLES.md):** Architectural defaults, escalation triggers (crate dependencies, API contracts, binary schemas), explicit typed domain errors, and strict type safety.
-* **[Verification Harness](HARNESS.md):** Quality pipeline specification and 15-iteration autonomous resolution mandate.
-* **[Agent Governance](AGENTS.md):** Operating instructions, phase execution loop, and verification rules for AI coding assistants.
+This repository enforces strict architectural guarantees:
+- **[`LAWS.md`](LAWS.md)**: Non-negotiable system invariants (binary headers `MSEDOC01`/`MSEIDX01`, monotonic delta-encoding, bounded finite BM25 scores, API JSON contracts).
+- **[`PRINCIPLES.md`](PRINCIPLES.md)**: Engineering defaults (strongly-typed errors, zero untyped bypasses, strict safety, escalation triggers).
+- **[`HARNESS.md`](HARNESS.md)**: Quality gates and verification lifecycle rules.
+- **[`AGENTS.md`](AGENTS.md)**: Operating instructions and autonomous verification protocols for AI coding assistants.
 
 ---
 
 ## License
+
 [MIT](LICENSE)
