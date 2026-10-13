@@ -65,7 +65,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use ranking::{
-    DEFAULT_ALPHA, DEFAULT_EPSILON, PageRankConfig, compute_pagerank, search_combined_mmap,
+    DEFAULT_ALPHA, DEFAULT_BETA, PageRankConfig, compute_pagerank, search_combined_mmap,
 };
 use storage::{
     BinaryIndexWriter, DocMetadata, IndexStore, MmapDocStore, MmapIndex, Posting, TermDictionary,
@@ -289,7 +289,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &dictionary,
             &pipeline,
             DEFAULT_ALPHA,
-            DEFAULT_EPSILON,
+            DEFAULT_BETA,
             5,
         );
         for (rank, (doc, score)) in results.iter().enumerate() {

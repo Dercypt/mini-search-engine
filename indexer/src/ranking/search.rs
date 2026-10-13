@@ -1,7 +1,7 @@
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use crate::ranking::bm25::{
-    DEFAULT_EPSILON, bm25_idf, bm25_tf_weight, final_score, parse_query, phrase_matches,
+    DEFAULT_BETA, bm25_idf, bm25_tf_weight, final_score, parse_query, phrase_matches,
 };
 use crate::ranking::wand::{ScoredDoc, WandPostingCursor};
 use crate::storage::mmap::{DocMetaRef, MmapIndex, TermDictionary};
@@ -14,7 +14,7 @@ pub fn search_combined_mmap<'a>(
     dictionary: &TermDictionary,
     pipeline: &TokenizerPipeline,
     alpha: f64,
-    epsilon: f64,
+    beta: f64,
     top_k: usize,
 ) -> Vec<(DocMetaRef<'a>, f64)> {
     if top_k == 0 {
@@ -94,7 +94,7 @@ pub fn search_combined_mmap<'a>(
 
     let n = index.total_docs as f64;
     let pr_max = if alpha < 1.0 {
-        (1.0 - alpha) * (1.0 + epsilon).ln()
+        (1.0 - alpha) * (1.0 + beta)
     } else {
         0.0
     };
@@ -172,7 +172,7 @@ pub fn search_combined_mmap<'a>(
                 }
 
                 let pr = index.get_pagerank(target_doc);
-                let score = final_score(bm25_total, pr, alpha, epsilon);
+                let score = final_score(bm25_total, pr, alpha, beta);
 
                 if heap.len() < top_k {
                     heap.push(ScoredDoc {
@@ -226,15 +226,7 @@ pub fn search_bm25_mmap<'a>(
     pipeline: &TokenizerPipeline,
     top_k: usize,
 ) -> Vec<(DocMetaRef<'a>, f64)> {
-    search_combined_mmap(
-        query,
-        index,
-        dictionary,
-        pipeline,
-        1.0,
-        DEFAULT_EPSILON,
-        top_k,
-    )
+    search_combined_mmap(query, index, dictionary, pipeline, 1.0, DEFAULT_BETA, top_k)
 }
 
 #[cfg(test)]
@@ -350,7 +342,7 @@ mod tests {
             &dictionary,
             &pipeline,
             1.0,
-            DEFAULT_EPSILON,
+            DEFAULT_BETA,
             10,
         );
         assert_eq!(quoted_res.len(), 1);
@@ -363,7 +355,7 @@ mod tests {
             &dictionary,
             &pipeline,
             1.0,
-            DEFAULT_EPSILON,
+            DEFAULT_BETA,
             10,
         );
         assert_eq!(rev_res.len(), 0);
@@ -375,7 +367,7 @@ mod tests {
             &dictionary,
             &pipeline,
             1.0,
-            DEFAULT_EPSILON,
+            DEFAULT_BETA,
             10,
         );
         assert_eq!(unquoted_res.len(), 2);
@@ -502,7 +494,7 @@ mod tests {
             &dictionary,
             &pipeline,
             1.0,
-            DEFAULT_EPSILON,
+            DEFAULT_BETA,
             2,
         );
         assert_eq!(top2_res.len(), 2);
@@ -517,7 +509,7 @@ mod tests {
             &dictionary,
             &pipeline,
             1.0,
-            DEFAULT_EPSILON,
+            DEFAULT_BETA,
             6,
         );
         assert_eq!(all_res.len(), 6);
@@ -527,6 +519,34 @@ mod tests {
         // Top 2 scores match exactly between top_k=2 and top_k=6
         assert!((top2_res[0].1 - all_res[0].1).abs() < 1e-9);
         assert!((top2_res[1].1 - all_res[1].1).abs() < 1e-9);
+
+        // Query with PageRank incorporated (alpha = 0.7, DEFAULT_BETA)
+        // Verify positive scores and that WAND dynamic pruning yields exact top-2 hits matching exhaustive scan
+        let pr_top2 = search_combined_mmap(
+            "alpha beta gamma",
+            &mmap_index,
+            &dictionary,
+            &pipeline,
+            0.7,
+            DEFAULT_BETA,
+            2,
+        );
+        let pr_all = search_combined_mmap(
+            "alpha beta gamma",
+            &mmap_index,
+            &dictionary,
+            &pipeline,
+            0.7,
+            DEFAULT_BETA,
+            6,
+        );
+        assert_eq!(pr_top2.len(), 2);
+        assert_eq!(pr_top2[0].0.hex_id, "doc0");
+        assert_eq!(pr_top2[1].0.hex_id, "doc1");
+        assert!(pr_top2[0].1 > 0.0);
+        assert!(pr_top2[1].1 > 0.0);
+        assert!((pr_top2[0].1 - pr_all[0].1).abs() < 1e-9);
+        assert!((pr_top2[1].1 - pr_all[1].1).abs() < 1e-9);
 
         let _ = std::fs::remove_file(test_index_path);
         let _ = std::fs::remove_file(test_fst_path);

@@ -13,7 +13,7 @@ use crate::api::state::{
     AppState, HealthResponse, SearchHit, SearchParams, SearchResponse, SuggestParams,
 };
 use crate::ranking::{
-    DEFAULT_ALPHA, DEFAULT_EPSILON, ScoredDoc, WandPostingCursor, bm25_idf, bm25_tf_weight,
+    DEFAULT_ALPHA, DEFAULT_BETA, ScoredDoc, WandPostingCursor, bm25_idf, bm25_tf_weight,
     final_score, generate_dynamic_snippet, parse_query, phrase_matches,
 };
 use crate::storage::PostingsIterator;
@@ -158,10 +158,10 @@ pub async fn search_handler(
     let b = 0.75;
     let n = state.index.total_docs as f64;
     let alpha = params.alpha.unwrap_or(DEFAULT_ALPHA).clamp(0.0, 1.0);
-    let epsilon = DEFAULT_EPSILON;
+    let beta = DEFAULT_BETA;
 
     let pr_max = if alpha < 1.0 {
-        (1.0 - alpha) * (1.0 + epsilon).ln()
+        (1.0 - alpha) * (1.0 + beta)
     } else {
         0.0
     };
@@ -237,7 +237,7 @@ pub async fn search_handler(
                 }
 
                 let pr = state.index.get_pagerank(target_doc);
-                let score = final_score(bm25_total, pr, alpha, epsilon);
+                let score = final_score(bm25_total, pr, alpha, beta);
 
                 if heap.len() < top_k {
                     heap.push(ScoredDoc {
