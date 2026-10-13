@@ -161,4 +161,63 @@ mod tests {
         assert!(!cursor.advance_to(50));
         assert!(!cursor.has_more);
     }
+
+    #[test]
+    fn test_wand_cursor_tracking_distinct_matching_docs() {
+        use std::collections::HashSet;
+
+        let mut buf1 = Vec::new();
+        // doc 1, 5, 10
+        encode_vbyte(1, &mut buf1);
+        encode_vbyte(1, &mut buf1);
+        encode_vbyte(0, &mut buf1);
+
+        encode_vbyte(4, &mut buf1);
+        encode_vbyte(1, &mut buf1);
+        encode_vbyte(0, &mut buf1);
+
+        encode_vbyte(5, &mut buf1);
+        encode_vbyte(1, &mut buf1);
+        encode_vbyte(0, &mut buf1);
+
+        let mut buf2 = Vec::new();
+        // doc 5, 20
+        encode_vbyte(5, &mut buf2);
+        encode_vbyte(1, &mut buf2);
+        encode_vbyte(0, &mut buf2);
+
+        encode_vbyte(15, &mut buf2);
+        encode_vbyte(1, &mut buf2);
+        encode_vbyte(0, &mut buf2);
+
+        let c1 = WandPostingCursor::new(&buf1, 3, 1.0, 1.0);
+        let c2 = WandPostingCursor::new(&buf2, 2, 1.0, 1.0);
+        let mut cursors = vec![c1, c2];
+
+        let mut matching_docs = HashSet::new();
+
+        while !cursors.is_empty() {
+            cursors.sort_unstable_by_key(|c| c.current_doc_id);
+            let pivot_doc = cursors[0].current_doc_id;
+
+            if cursors.iter().all(|c| c.current_doc_id == pivot_doc) {
+                matching_docs.insert(pivot_doc);
+                for c in cursors.iter_mut() {
+                    c.read_next();
+                }
+            } else {
+                let doc_id = cursors[0].current_doc_id;
+                matching_docs.insert(doc_id);
+                cursors[0].read_next();
+            }
+            cursors.retain(|c| c.has_more);
+        }
+
+        // Distinct docs matching the query terms union: doc 1, 5, 10, 20
+        assert_eq!(matching_docs.len(), 4);
+        assert!(matching_docs.contains(&1));
+        assert!(matching_docs.contains(&5));
+        assert!(matching_docs.contains(&10));
+        assert!(matching_docs.contains(&20));
+    }
 }
