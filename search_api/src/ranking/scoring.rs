@@ -1,16 +1,17 @@
 use crate::tokenizer::TokenizerPipeline;
 
 pub const DEFAULT_ALPHA: f64 = 0.7;
+pub const DEFAULT_BETA: f64 = 1.0;
 pub const DEFAULT_EPSILON: f64 = 1e-6;
 
 #[inline]
-pub fn final_score(bm25_score: f64, pagerank: f64, alpha: f64, epsilon: f64) -> f64 {
-    alpha * bm25_score + (1.0 - alpha) * (pagerank + epsilon).ln()
+pub fn final_score(bm25_score: f64, pagerank: f64, alpha: f64, beta: f64) -> f64 {
+    alpha * bm25_score + (1.0 - alpha) * (1.0 + beta * pagerank)
 }
 
 #[inline]
-pub fn compute_final_score(bm25_score: f64, pagerank: f64, alpha: f64, epsilon: f64) -> f64 {
-    final_score(bm25_score, pagerank, alpha, epsilon)
+pub fn compute_final_score(bm25_score: f64, pagerank: f64, alpha: f64, beta: f64) -> f64 {
+    final_score(bm25_score, pagerank, alpha, beta)
 }
 
 #[inline]
@@ -149,22 +150,52 @@ mod tests {
         let bm25: f64 = 6.0;
         let pr: f64 = 0.04;
         let alpha: f64 = 0.7;
-        let epsilon: f64 = 1e-6;
+        let beta: f64 = 1.0;
 
-        let expected = alpha * bm25 + (1.0 - alpha) * (pr + epsilon).ln();
-        let computed = final_score(bm25, pr, alpha, epsilon);
+        let expected = alpha * bm25 + (1.0 - alpha) * (1.0 + beta * pr);
+        let computed = final_score(bm25, pr, alpha, beta);
 
         assert!((computed - expected).abs() < 1e-10);
+        assert!(computed > 0.0);
     }
 
     #[test]
     fn test_final_score_alpha_extremes() {
         let bm25: f64 = 4.2;
         let pr: f64 = 0.01;
-        let epsilon: f64 = 1e-6;
+        let beta: f64 = 1.0;
 
-        assert!((final_score(bm25, pr, 1.0, epsilon) - bm25).abs() < 1e-10);
-        assert!((final_score(bm25, pr, 0.0, epsilon) - (pr + epsilon).ln()).abs() < 1e-10);
+        assert!((final_score(bm25, pr, 1.0, beta) - bm25).abs() < 1e-10);
+        assert!((final_score(bm25, pr, 0.0, beta) - (1.0 + beta * pr)).abs() < 1e-10);
+        assert!(final_score(bm25, pr, 0.0, beta) > 0.0);
+    }
+
+    #[test]
+    fn test_final_score_positivity_and_monotonicity() {
+        let bm25_scores = [0.0, 1.0, 5.0, 10.0];
+        let pagerank_scores = [0.0, 1e-6, 0.001, 0.05, 0.5, 1.0];
+        let alphas = [0.0, 0.3, 0.5, 0.7, 0.85, 1.0];
+
+        for &bm25 in &bm25_scores {
+            for &pr in &pagerank_scores {
+                for &alpha in &alphas {
+                    let score = final_score(bm25, pr, alpha, DEFAULT_BETA);
+                    assert!(score.is_finite(), "Score must be finite");
+                    assert!(score >= 0.0, "Score must be non-negative");
+                    if alpha < 1.0 {
+                        assert!(
+                            score > 0.0,
+                            "Score must be strictly positive when alpha < 1.0"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Higher PageRank must yield strictly higher score for same BM25 and alpha < 1.0
+        let s_low = final_score(3.0, 0.001, 0.7, DEFAULT_BETA);
+        let s_high = final_score(3.0, 0.01, 0.7, DEFAULT_BETA);
+        assert!(s_high > s_low);
     }
 
     #[test]
