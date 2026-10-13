@@ -191,6 +191,7 @@ pub async fn search_handler(
 
     let mut heap: BinaryHeap<ScoredDoc> = BinaryHeap::with_capacity(top_k + 1);
     let mut threshold = f64::NEG_INFINITY;
+    let mut matching_docs: HashSet<u32> = HashSet::new();
 
     while !cursors.is_empty() {
         // Sort cursors by current_doc_id
@@ -223,6 +224,7 @@ pub async fn search_handler(
                 .is_none_or(|docs| docs.contains(&target_doc));
 
             if is_allowed {
+                matching_docs.insert(target_doc);
                 let doc_len = state.index.get_doc_length(target_doc) as f64;
                 let mut bm25_total = 0.0;
 
@@ -263,6 +265,14 @@ pub async fn search_handler(
                 }
             }
         } else {
+            // Track skipped document as matching before advancing
+            let doc_id = cursors[0].current_doc_id;
+            let is_allowed = phrase_matching_docs
+                .as_ref()
+                .is_none_or(|docs| docs.contains(&doc_id));
+            if is_allowed {
+                matching_docs.insert(doc_id);
+            }
             // Skip uncompetitive documents: advance cursor 0 to at least pivot_doc
             cursors[0].advance_to(pivot_doc);
         }
@@ -280,7 +290,7 @@ pub async fn search_handler(
             .then_with(|| a.0.cmp(&b.0))
     });
 
-    let total_hits = ranked.len();
+    let total_hits = matching_docs.len();
     let total_pages = total_hits.div_ceil(limit);
 
     // Fuzzy matching fallback if zero hits were scored
