@@ -347,110 +347,142 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_else(|e| panic!("failed to finish {}: {}", bin_path_writer.display(), e))
     });
 
-    while let Some(current_url) = rx.recv().await {
+    let in_flight = Arc::new(AtomicUsize::new(0));
+
+    loop {
         let current_count = doc_count.load(Ordering::Relaxed);
         if current_count >= max_pages {
             break;
         }
 
-        let permit = semaphore.clone().acquire_owned().await.unwrap();
-        let client = client.clone();
-        let tx = tx.clone();
-        let bloom_filter = bloom_filter.clone();
-        let doc_tx = doc_tx.clone();
-        let doc_count = doc_count.clone();
-        let robots_matcher = robots_matcher.clone();
-        let base_url = base_url.clone();
-        let seed_host = seed_host.clone();
+        tokio::select! {
+            maybe_url = rx.recv() => {
+                let Some(current_url) = maybe_url else {
+                    break;
+                };
 
-        tokio::spawn(async move {
-            let _permit = permit;
+                let current_count = doc_count.load(Ordering::Relaxed);
+                if current_count >= max_pages {
+                    break;
+                }
 
-            sleep(Duration::from_millis(80)).await;
+                let permit = semaphore.clone().acquire_owned().await.unwrap();
+                let client = client.clone();
+                let tx = tx.clone();
+                let bloom_filter = bloom_filter.clone();
+                let doc_tx = doc_tx.clone();
+                let doc_count = doc_count.clone();
+                let robots_matcher = robots_matcher.clone();
+                let base_url = base_url.clone();
+                let seed_host = seed_host.clone();
+                let in_flight = in_flight.clone();
 
-            let response = match client.get(&current_url).send().await {
-                Ok(res) => res,
-                Err(_) => return,
-            };
+                in_flight.fetch_add(1, Ordering::SeqCst);
 
-            let html_text = match response.text().await {
-                Ok(text) => text,
-                Err(_) => return,
-            };
+                tokio::spawn(async move {
+                    let _permit = permit;
 
-            let (title, content, outgoing_links) = {
-                let document = Html::parse_document(&html_text);
+                    sleep(Duration::from_millis(80)).await;
 
-                let title_selector = Selector::parse("h1#firstHeading, title").unwrap();
-                // Descendant selector for all body text paragraphs
-                let body_selector =
-                    Selector::parse("div.mw-parser-output p, div#bodyContent p").unwrap();
-                // Scope links to the article body content area
-                let link_selector = Selector::parse("div#bodyContent a[href]").unwrap();
+                    let response = match client.get(&current_url).send().await {
+                        Ok(res) => res,
+                        Err(_) => {
+                            in_flight.fetch_sub(1, Ordering::SeqCst);
+                            return;
+                        }
+                    };
 
-                let title = document
-                    .select(&title_selector)
-                    .next()
-                    .map(|el| el.text().collect::<Vec<_>>().join(" "))
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string();
+                    let html_text = match response.text().await {
+                        Ok(text) => text,
+                        Err(_) => {
+                            in_flight.fetch_sub(1, Ordering::SeqCst);
+                            return;
+                        }
+                    };
 
-                let content_pieces: Vec<String> = document
-                    .select(&body_selector)
-                    .map(|el| el.text().collect::<Vec<_>>().join(" ").trim().to_string())
-                    .filter(|s| s.len() > 20) // Skip empty/stub snippet strings
-                    .collect();
+                    let (title, content, outgoing_links) = {
+                        let document = Html::parse_document(&html_text);
 
-                let content = content_pieces.join(" ");
+                        let title_selector = Selector::parse("h1#firstHeading, title").unwrap();
+                        // Descendant selector for all body text paragraphs
+                        let body_selector =
+                            Selector::parse("div.mw-parser-output p, div#bodyContent p").unwrap();
+                        // Scope links to the article body content area
+                        let link_selector = Selector::parse("div#bodyContent a[href]").unwrap();
 
-                let mut outgoing_set = HashSet::new();
+                        let title = document
+                            .select(&title_selector)
+                            .next()
+                            .map(|el| el.text().collect::<Vec<_>>().join(" "))
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string();
 
-                for element in document.select(&link_selector) {
-                    if let Some(href) = element.value().attr("href")
-                        && let Ok(resolved) = base_url.join(href)
-                        && resolved.host_str() == Some(&seed_host)
-                        && robots_matcher.check_path(
-                            &resolved[url::Position::BeforePath..url::Position::AfterQuery],
-                        )
-                        && let Some(normalized) = normalize_url(resolved.as_str())
-                        && normalized != current_url
-                    {
-                        outgoing_set.insert(normalized);
+                        let content_pieces: Vec<String> = document
+                            .select(&body_selector)
+                            .map(|el| el.text().collect::<Vec<_>>().join(" ").trim().to_string())
+                            .filter(|s| s.len() > 20) // Skip empty/stub snippet strings
+                            .collect();
+
+                        let content = content_pieces.join(" ");
+
+                        let mut outgoing_set = HashSet::new();
+
+                        for element in document.select(&link_selector) {
+                            if let Some(href) = element.value().attr("href")
+                                && let Ok(resolved) = base_url.join(href)
+                                && resolved.host_str() == Some(&seed_host)
+                                && robots_matcher.check_path(
+                                    &resolved[url::Position::BeforePath..url::Position::AfterQuery],
+                                )
+                                && let Some(normalized) = normalize_url(resolved.as_str())
+                                && normalized != current_url
+                            {
+                                outgoing_set.insert(normalized);
+                            }
+                        }
+
+                        let outgoing_links: Vec<String> = outgoing_set.into_iter().collect();
+                        (title, content, outgoing_links)
+                    };
+
+                    // Avoid storing empty pages
+                    if content.is_empty() {
+                        in_flight.fetch_sub(1, Ordering::SeqCst);
+                        return;
                     }
+
+                    let doc = Document {
+                        id: hash_url(&current_url),
+                        url: current_url.clone(),
+                        title,
+                        content,
+                        links: outgoing_links.clone(),
+                    };
+
+                    for link in &outgoing_links {
+                        let mut bloom = bloom_filter.lock().await;
+                        if !bloom.contains(link) {
+                            bloom.insert(link);
+                            let _ = tx.send(link.clone());
+                        }
+                    }
+
+                    let prev = doc_count.fetch_add(1, Ordering::SeqCst);
+                    if prev < max_pages {
+                        println!("[{}/{}] Scraped: {}", prev + 1, max_pages, current_url);
+                        let _ = doc_tx.send(doc).await;
+                    }
+
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+            _ = sleep(Duration::from_millis(50)) => {
+                if in_flight.load(Ordering::SeqCst) == 0 && rx.is_empty() {
+                    break;
                 }
-
-                let outgoing_links: Vec<String> = outgoing_set.into_iter().collect();
-                (title, content, outgoing_links)
-            };
-
-            // Avoid storing empty pages
-            if content.is_empty() {
-                return;
             }
-
-            let doc = Document {
-                id: hash_url(&current_url),
-                url: current_url.clone(),
-                title,
-                content,
-                links: outgoing_links.clone(),
-            };
-
-            for link in &outgoing_links {
-                let mut bloom = bloom_filter.lock().await;
-                if !bloom.contains(link) {
-                    bloom.insert(link);
-                    let _ = tx.send(link.clone());
-                }
-            }
-
-            let prev = doc_count.fetch_add(1, Ordering::SeqCst);
-            if prev < max_pages {
-                println!("[{}/{}] Scraped: {}", prev + 1, max_pages, current_url);
-                let _ = doc_tx.send(doc).await;
-            }
-        });
+        }
     }
 
     // Drop original sender so writer knows when all items are received
@@ -690,5 +722,48 @@ Disallow: /
         let empty_matcher = parse_robots_txt("", BOT_NAME);
         assert!(empty_matcher.check_path("/any/page"));
         assert!(empty_matcher.check_path("/w/index.php"));
+    }
+
+    #[tokio::test]
+    async fn test_crawler_loop_termination_on_exhaustion() {
+        // Verify that when no further URLs are discovered and in_flight tasks reach 0,
+        // the crawler loop does not hang or deadlock even if the primary tx is kept alive.
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let doc_count = Arc::new(AtomicUsize::new(0));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_pages = 10;
+
+        // Seed with 1 URL
+        tx.send("https://example.com/page1".to_string()).unwrap();
+
+        let mut loop_iterations = 0;
+        let start = std::time::Instant::now();
+
+        loop {
+            let current_count = doc_count.load(Ordering::Relaxed);
+            if current_count >= max_pages {
+                break;
+            }
+
+            tokio::select! {
+                maybe_url = rx.recv() => {
+                    let Some(_url) = maybe_url else {
+                        break;
+                    };
+                    loop_iterations += 1;
+                    in_flight.fetch_add(1, Ordering::SeqCst);
+                    // Simulate task finishing without generating any new URLs (bloom filter hit or no links)
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                }
+                _ = sleep(Duration::from_millis(50)) => {
+                    if in_flight.load(Ordering::SeqCst) == 0 && rx.is_empty() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        assert_eq!(loop_iterations, 1);
+        assert!(start.elapsed() < Duration::from_secs(2));
     }
 }
