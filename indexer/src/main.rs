@@ -53,9 +53,7 @@
 //!    - The engine updates its commit point atomically; active queries continue referencing
 //!      older segments until their iterators finish, after which obsolete segment files are unlinked.
 
-pub mod ranking;
-pub mod storage;
-pub mod tokenizer;
+pub use engine_core::{ranking, storage, tokenizer};
 
 use fst::MapBuilder;
 use std::collections::HashMap;

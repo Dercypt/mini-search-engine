@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -17,6 +17,8 @@ use std::time::Duration;
 use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio::time::sleep;
 use url::Url;
+
+use engine_core::storage::DocStoreWriter;
 
 /// Configurable command-line arguments for the concurrent crawler.
 #[derive(Parser, Debug, Clone)]
@@ -138,103 +140,6 @@ pub async fn fetch_and_parse_robots(
             eprintln!("Warning: Failed to fetch robots.txt: {e}. Defaulting to allow all.");
             SimpleMatcher::GlobalRule(true)
         }
-    }
-}
-
-// ============================================================================
-// Streaming Binary Document Storage Writer (documents.bin)
-// ============================================================================
-
-pub struct DocStoreWriter {
-    file: BufWriter<File>,
-    doc_count: u32,
-    offsets: Vec<(u64, u32)>,
-    current_offset: u64,
-}
-
-impl DocStoreWriter {
-    pub fn create<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<Self> {
-        let file = File::create(path)?;
-        let mut writer = BufWriter::new(file);
-        let placeholder = [0u8; 64];
-        writer.write_all(&placeholder)?;
-        Ok(Self {
-            file: writer,
-            doc_count: 0,
-            offsets: Vec::new(),
-            current_offset: 64,
-        })
-    }
-
-    pub fn append(
-        &mut self,
-        id: &str,
-        url: &str,
-        title: &str,
-        content: &str,
-        links: &[String],
-    ) -> std::io::Result<u32> {
-        let start_offset = self.current_offset;
-        let mut written = 0u32;
-
-        let id_bytes = id.as_bytes();
-        self.file
-            .write_all(&(id_bytes.len() as u16).to_le_bytes())?;
-        self.file.write_all(id_bytes)?;
-        written += 2 + id_bytes.len() as u32;
-
-        let url_bytes = url.as_bytes();
-        self.file
-            .write_all(&(url_bytes.len() as u16).to_le_bytes())?;
-        self.file.write_all(url_bytes)?;
-        written += 2 + url_bytes.len() as u32;
-
-        let title_bytes = title.as_bytes();
-        self.file
-            .write_all(&(title_bytes.len() as u16).to_le_bytes())?;
-        self.file.write_all(title_bytes)?;
-        written += 2 + title_bytes.len() as u32;
-
-        let content_bytes = content.as_bytes();
-        self.file
-            .write_all(&(content_bytes.len() as u32).to_le_bytes())?;
-        self.file.write_all(content_bytes)?;
-        written += 4 + content_bytes.len() as u32;
-
-        self.file.write_all(&(links.len() as u32).to_le_bytes())?;
-        written += 4;
-        for link in links {
-            let link_bytes = link.as_bytes();
-            self.file
-                .write_all(&(link_bytes.len() as u16).to_le_bytes())?;
-            self.file.write_all(link_bytes)?;
-            written += 2 + link_bytes.len() as u32;
-        }
-
-        self.offsets.push((start_offset, written));
-        self.current_offset += written as u64;
-        let doc_id = self.doc_count;
-        self.doc_count += 1;
-        Ok(doc_id)
-    }
-
-    pub fn finish(mut self) -> std::io::Result<u32> {
-        let index_offset = self.current_offset;
-        for (offset, len) in &self.offsets {
-            self.file.write_all(&offset.to_le_bytes())?;
-            self.file.write_all(&len.to_le_bytes())?;
-        }
-        self.file.flush()?;
-
-        let mut file = self.file.into_inner().map_err(|e| e.into_error())?;
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(b"MSEDOC01")?;
-        file.write_all(&self.doc_count.to_le_bytes())?;
-        file.write_all(&index_offset.to_le_bytes())?;
-        let padding = [0u8; 44];
-        file.write_all(&padding)?;
-        file.flush()?;
-        Ok(self.doc_count)
     }
 }
 

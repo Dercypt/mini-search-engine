@@ -75,7 +75,6 @@ pub fn power_iteration_pagerank(
     let out_degrees: Vec<usize> = out_edges.iter().map(|edges| edges.len()).collect();
 
     for _iter in 0..config.max_iterations {
-        // Collect PageRank mass from dangling nodes (out_degree == 0)
         let dangling_sum: f64 = (0..total_docs)
             .filter(|&u| out_degrees[u] == 0)
             .map(|u| pr[u])
@@ -126,7 +125,6 @@ mod tests {
 
     #[test]
     fn test_pagerank_two_nodes_symmetric() {
-        // 0 -> 1 and 1 -> 0
         let edges = vec![vec![1], vec![0]];
         let config = PageRankConfig::default();
         let pr = power_iteration_pagerank(2, &edges, &config);
@@ -139,10 +137,6 @@ mod tests {
 
     #[test]
     fn test_pagerank_three_nodes_flow() {
-        // 0 -> 1, 0 -> 2
-        // 1 -> 2
-        // 2 -> 0
-        // Node 2 has highest incoming authority
         let edges = vec![vec![1, 2], vec![2], vec![0]];
         let config = PageRankConfig::default();
         let pr = power_iteration_pagerank(3, &edges, &config);
@@ -156,7 +150,6 @@ mod tests {
 
     #[test]
     fn test_pagerank_dangling_node_mass_preservation() {
-        // 0 -> 1; 1 has no outgoing links (dangling)
         let edges = vec![vec![1], vec![]];
         let config = PageRankConfig::default();
         let pr = power_iteration_pagerank(2, &edges, &config);
@@ -164,7 +157,6 @@ mod tests {
         assert_eq!(pr.len(), 2);
         let sum: f64 = pr.iter().sum();
         assert!((sum - 1.0).abs() < 1e-6);
-        // Node 1 receives incoming link from 0, so pr[1] > pr[0]
         assert!(pr[1] > pr[0]);
     }
 

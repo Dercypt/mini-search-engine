@@ -1,19 +1,20 @@
 use fst::automaton::{Levenshtein, Str};
-use fst::{Automaton, IntoStreamer, Map, Streamer};
+use fst::{Automaton, IntoStreamer, Map, MapBuilder, Streamer};
 use std::fs::File;
+use std::io::BufWriter;
 use std::path::Path;
-
-pub struct TermEntry {
-    pub postings_offset: u64,
-    pub postings_len: u32,
-    pub doc_freq: u32,
-}
 
 pub struct DocMetaRef<'a> {
     pub hex_id: &'a str,
     pub url: &'a str,
     pub title: &'a str,
     pub pagerank: f64,
+}
+
+pub struct TermEntry {
+    pub postings_offset: u64,
+    pub postings_len: u32,
+    pub doc_freq: u32,
 }
 
 pub struct MmapIndex {
@@ -33,6 +34,8 @@ pub struct MmapIndex {
 impl MmapIndex {
     pub fn open<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
         let file = File::open(path)?;
+        // SAFETY: The index file is opened read-only and mapped into memory.
+        // File boundary and the MSEIDX01 128-byte header are verified before any internal slicing.
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
         if mmap.len() < 128 || &mmap[0..8] != b"MSEIDX01" {
             return Err(std::io::Error::new(
@@ -205,9 +208,36 @@ pub struct TermDictionary {
 impl TermDictionary {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         let file = File::open(path)?;
+        // SAFETY: The FST dictionary file is mapped read-only for fast prefix and fuzzy lookups.
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
         let fst_map = Map::new(mmap)?;
         Ok(Self { fst_map })
+    }
+
+    pub fn build_from_index<P: AsRef<Path>>(
+        fst_path: P,
+        index: &MmapIndex,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let file = File::create(fst_path.as_ref())?;
+        let writer = BufWriter::new(file);
+        let mut builder = MapBuilder::new(writer)?;
+        for idx in 0..index.num_terms as usize {
+            if let Some(term) = index.get_term_str(idx) {
+                builder.insert(term.as_bytes(), idx as u64)?;
+            }
+        }
+        builder.finish()?;
+        Self::open(fst_path)
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.fst_map.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.fst_map.is_empty()
     }
 
     pub fn get(&self, term: &str) -> Option<u64> {
@@ -263,7 +293,7 @@ mod tests {
     #[test]
     fn test_truncated_mmap_index_access_does_not_panic() {
         let temp_dir = std::env::temp_dir();
-        let file_path = temp_dir.join(format!("test_trunc_indexer_{}.bin", std::process::id()));
+        let file_path = temp_dir.join(format!("test_trunc_core_{}.bin", std::process::id()));
         {
             let mut file = File::create(&file_path).unwrap();
             let mut header = vec![0u8; 128];

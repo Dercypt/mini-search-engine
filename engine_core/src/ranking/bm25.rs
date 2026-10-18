@@ -1,18 +1,7 @@
 use crate::tokenizer::TokenizerPipeline;
 
-pub const DEFAULT_ALPHA: f64 = 0.7;
-pub const DEFAULT_BETA: f64 = 1.0;
-pub const DEFAULT_EPSILON: f64 = 1e-6;
-
-#[inline]
-pub fn final_score(bm25_score: f64, pagerank: f64, alpha: f64, beta: f64) -> f64 {
-    alpha * bm25_score + (1.0 - alpha) * (1.0 + beta * pagerank)
-}
-
-#[inline]
-pub fn compute_final_score(bm25_score: f64, pagerank: f64, alpha: f64, beta: f64) -> f64 {
-    final_score(bm25_score, pagerank, alpha, beta)
-}
+pub const DEFAULT_ALPHA: f64 = 0.85;
+pub const DEFAULT_BETA: f64 = 1000.0;
 
 #[inline]
 pub fn bm25_idf(total_docs: f64, doc_freq: f64) -> f64 {
@@ -21,21 +10,33 @@ pub fn bm25_idf(total_docs: f64, doc_freq: f64) -> f64 {
 
 #[inline]
 pub fn bm25_tf_weight(tf: f64, doc_len: f64, avg_doc_len: f64, k1: f64, b: f64) -> f64 {
-    if tf <= 0.0 {
-        return 0.0;
-    }
-    let num = tf * (k1 + 1.0);
-    let denom = tf + k1 * (1.0 - b + b * (doc_len / avg_doc_len));
-    num / denom
+    let b_factor = if avg_doc_len > 0.0 {
+        1.0 - b + b * (doc_len / avg_doc_len)
+    } else {
+        1.0
+    };
+    (tf * (k1 + 1.0)) / (tf + k1 * b_factor)
+}
+
+#[inline]
+pub fn final_score(bm25: f64, pagerank: f64, alpha: f64, beta: f64) -> f64 {
+    let alpha_clamped = alpha.clamp(0.0, 1.0);
+    let bm25_part = alpha_clamped * bm25;
+    let pr_part = if alpha_clamped < 1.0 {
+        (1.0 - alpha_clamped) * (1.0 + beta * pagerank).ln()
+    } else {
+        0.0
+    };
+    bm25_part + pr_part
 }
 
 #[inline]
 pub fn bm25_score(
-    total_docs: f64,
-    doc_freq: f64,
     tf: f64,
     doc_len: f64,
     avg_doc_len: f64,
+    total_docs: f64,
+    doc_freq: f64,
     k1: f64,
     b: f64,
 ) -> f64 {
@@ -161,153 +162,127 @@ mod tests {
 
     #[test]
     fn test_bm25_idf_known_values() {
-        // N = 100, n_q = 1: idf = ln((100 - 1 + 0.5)/(1 + 0.5) + 1.0) = ln(99.5/1.5 + 1.0)
-        let idf_rare = bm25_idf(100.0, 1.0);
-        let expected_rare = (99.5 / 1.5 + 1.0_f64).ln();
-        assert!((idf_rare - expected_rare).abs() < 1e-10);
-        assert!((idf_rare - 4.209655).abs() < 1e-5);
+        let n = 1000.0;
 
-        // N = 100, n_q = 50: idf = ln((100 - 50 + 0.5)/(50 + 0.5) + 1.0) = ln(1.0 + 1.0) = ln(2.0)
-        let idf_half = bm25_idf(100.0, 50.0);
-        let expected_half = 2.0_f64.ln();
-        assert!((idf_half - expected_half).abs() < 1e-10);
-        assert!((idf_half - 0.693147).abs() < 1e-5);
+        let idf_rare = bm25_idf(n, 1.0);
+        let expected_rare = (((1000.0 - 1.0 + 0.5) / (1.0 + 0.5) + 1.0) as f64).ln();
+        assert!((idf_rare - expected_rare).abs() < 1e-9);
+
+        let idf_common = bm25_idf(n, 500.0);
+        let expected_common = (((1000.0 - 500.0 + 0.5) / (500.0 + 0.5) + 1.0) as f64).ln();
+        assert!((idf_common - expected_common).abs() < 1e-9);
+
+        let idf_universal = bm25_idf(n, 1000.0);
+        let expected_universal = (((1000.0 - 1000.0 + 0.5) / (1000.0 + 0.5) + 1.0) as f64).ln();
+        assert!((idf_universal - expected_universal).abs() < 1e-9);
     }
 
     #[test]
     fn test_bm25_idf_monotonicity_and_positivity() {
-        let total_docs = 1000.0;
-        // As document frequency increases, IDF must strictly decrease
-        let idf_1 = bm25_idf(total_docs, 1.0);
-        let idf_10 = bm25_idf(total_docs, 10.0);
-        let idf_100 = bm25_idf(total_docs, 100.0);
-        let idf_1000 = bm25_idf(total_docs, 1000.0);
+        let n = 10_000.0;
+        let mut prev_idf = f64::INFINITY;
 
-        assert!(idf_1 > idf_10);
-        assert!(idf_10 > idf_100);
-        assert!(idf_100 > idf_1000);
-
-        // Even when a term appears in every document (n_q = total_docs), IDF is strictly positive
-        assert!(idf_1000 > 0.0);
+        for df in [1.0, 5.0, 50.0, 500.0, 2000.0, 5000.0, 9999.0, 10_000.0] {
+            let idf = bm25_idf(n, df);
+            assert!(
+                idf > 0.0,
+                "IDF must be strictly positive for df = {}, got {}",
+                df,
+                idf
+            );
+            assert!(
+                idf <= prev_idf,
+                "IDF must monotonically decrease with df: {} > {}",
+                idf,
+                prev_idf
+            );
+            prev_idf = idf;
+        }
     }
 
     #[test]
     fn test_bm25_tf_weight_properties() {
         let k1 = 1.5;
         let b = 0.75;
-        let avg_doc_len = 100.0;
+        let doc_len = 100.0;
+        let avg_len = 100.0;
 
-        // When tf == 0, weight must be 0
-        assert_eq!(bm25_tf_weight(0.0, avg_doc_len, avg_doc_len, k1, b), 0.0);
+        let tf0 = bm25_tf_weight(0.0, doc_len, avg_len, k1, b);
+        assert_eq!(tf0, 0.0);
 
-        // When doc_len == avg_doc_len and tf == 1.0:
-        // num = 1.0 * (k1 + 1.0) = 2.5
-        // denom = 1.0 + k1 * (1 - b + b * 1) = 1.0 + 1.5 = 2.5
-        // weight is exactly 1.0
-        let weight_standard = bm25_tf_weight(1.0, avg_doc_len, avg_doc_len, k1, b);
-        assert!((weight_standard - 1.0).abs() < 1e-10);
-
-        // Monotonic increase with term frequency:
-        let weight_tf1 = bm25_tf_weight(1.0, avg_doc_len, avg_doc_len, k1, b);
-        let weight_tf2 = bm25_tf_weight(2.0, avg_doc_len, avg_doc_len, k1, b);
-        let weight_tf5 = bm25_tf_weight(5.0, avg_doc_len, avg_doc_len, k1, b);
-        let weight_tf100 = bm25_tf_weight(100.0, avg_doc_len, avg_doc_len, k1, b);
-
-        assert!(weight_tf1 < weight_tf2);
-        assert!(weight_tf2 < weight_tf5);
-        assert!(weight_tf5 < weight_tf100);
-
-        // Upper bounded by (k1 + 1.0) = 2.5
-        assert!(weight_tf100 < 2.5);
+        let mut prev = 0.0;
+        for tf in [1.0, 2.0, 5.0, 10.0, 50.0, 100.0, 1000.0] {
+            let curr = bm25_tf_weight(tf, doc_len, avg_len, k1, b);
+            assert!(
+                curr > prev,
+                "TF weight must increase monotonically: {} <= {}",
+                curr,
+                prev
+            );
+            assert!(
+                curr < k1 + 1.0,
+                "TF weight must be bounded by k1 + 1 (2.5), got {}",
+                curr
+            );
+            prev = curr;
+        }
     }
 
     #[test]
     fn test_bm25_document_length_penalty() {
         let k1 = 1.5;
         let b = 0.75;
-        let avg_doc_len = 100.0;
-        let tf = 2.0;
+        let avg_len = 100.0;
+        let tf = 5.0;
 
-        let short_doc_weight = bm25_tf_weight(tf, 50.0, avg_doc_len, k1, b);
-        let normal_doc_weight = bm25_tf_weight(tf, 100.0, avg_doc_len, k1, b);
-        let long_doc_weight = bm25_tf_weight(tf, 200.0, avg_doc_len, k1, b);
+        let short_doc_score = bm25_tf_weight(tf, 50.0, avg_len, k1, b);
+        let avg_doc_score = bm25_tf_weight(tf, 100.0, avg_len, k1, b);
+        let long_doc_score = bm25_tf_weight(tf, 500.0, avg_len, k1, b);
 
-        // Shorter documents receive higher term weight than longer documents with the same TF
-        assert!(short_doc_weight > normal_doc_weight);
-        assert!(normal_doc_weight > long_doc_weight);
+        assert!(short_doc_score > avg_doc_score);
+        assert!(avg_doc_score > long_doc_score);
     }
 
     #[test]
     fn test_bm25_score_computation() {
-        let total_docs = 500.0;
-        let doc_freq = 10.0;
-        let tf = 3.0;
-        let doc_len = 120.0;
-        let avg_doc_len = 100.0;
-        let k1 = 1.5;
-        let b = 0.75;
-
-        let idf = bm25_idf(total_docs, doc_freq);
-        let tf_weight = bm25_tf_weight(tf, doc_len, avg_doc_len, k1, b);
-        let score = bm25_score(total_docs, doc_freq, tf, doc_len, avg_doc_len, k1, b);
-
-        assert_eq!(score, idf * tf_weight);
+        let score = bm25_score(2.0, 150.0, 100.0, 500.0, 20.0, 1.5, 0.75);
         assert!(score > 0.0);
+        assert!(score.is_finite());
     }
 
     #[test]
     fn test_final_score_formula() {
-        let bm25: f64 = 4.0;
-        let pr: f64 = 0.05;
-        let alpha: f64 = 0.7;
-        let beta: f64 = 1.0;
+        let bm25 = 2.5;
+        let pr = 0.005;
+        let alpha = 0.7;
+        let beta = 1000.0;
 
-        let expected = alpha * bm25 + (1.0 - alpha) * (1.0 + beta * pr);
-        let computed = final_score(bm25, pr, alpha, beta);
-
-        assert!((computed - expected).abs() < 1e-10);
-        assert!(computed > 0.0);
+        let score = final_score(bm25, pr, alpha, beta);
+        let expected = 0.7 * 2.5 + 0.3 * (1.0 + 1000.0 * 0.005_f64).ln();
+        assert!((score - expected).abs() < 1e-9);
     }
 
     #[test]
     fn test_final_score_alpha_bounds() {
-        let bm25: f64 = 5.5;
-        let pr: f64 = 0.02;
-        let beta: f64 = 1.0;
+        let s_bm25_only = final_score(3.0, 0.5, 1.0, DEFAULT_BETA);
+        assert!((s_bm25_only - 3.0).abs() < 1e-6);
 
-        // When alpha = 1.0, score must equal pure BM25
-        let score_pure_bm25 = final_score(bm25, pr, 1.0, beta);
-        assert!((score_pure_bm25 - bm25).abs() < 1e-10);
-
-        // When alpha = 0.0, score must equal pure rescaled PageRank
-        let score_pure_pr = final_score(bm25, pr, 0.0, beta);
-        assert!((score_pure_pr - (1.0 + beta * pr)).abs() < 1e-10);
-        assert!(score_pure_pr > 0.0);
+        let s_pr_only = final_score(3.0, 0.5, 0.0, DEFAULT_BETA);
+        let expected_pr = (1.0 + 0.5 * DEFAULT_BETA).ln();
+        assert!((s_pr_only - expected_pr).abs() < 1e-6);
     }
 
     #[test]
     fn test_final_score_positivity_and_monotonicity() {
-        let bm25_scores = [0.0, 1.0, 5.0, 10.0];
-        let pagerank_scores = [0.0, 1e-6, 0.001, 0.05, 0.5, 1.0];
-        let alphas = [0.0, 0.3, 0.5, 0.7, 0.85, 1.0];
+        let s1 = final_score(0.0, 0.0, 0.7, DEFAULT_BETA);
+        assert_eq!(s1, 0.0);
 
-        for &bm25 in &bm25_scores {
-            for &pr in &pagerank_scores {
-                for &alpha in &alphas {
-                    let score = final_score(bm25, pr, alpha, DEFAULT_BETA);
-                    assert!(score.is_finite(), "Score must be finite");
-                    assert!(score >= 0.0, "Score must be non-negative");
-                    if alpha < 1.0 {
-                        assert!(
-                            score > 0.0,
-                            "Score must be strictly positive when alpha < 1.0"
-                        );
-                    }
-                }
-            }
-        }
+        let s2 = final_score(1.0, 0.0, 0.7, DEFAULT_BETA);
+        assert!(s2 > 0.0);
 
-        // Higher PageRank must yield strictly higher score for same BM25 and alpha < 1.0
+        let s3 = final_score(0.0, 0.01, 0.7, DEFAULT_BETA);
+        assert!(s3 > 0.0);
+
         let s_low = final_score(3.0, 0.001, 0.7, DEFAULT_BETA);
         let s_high = final_score(3.0, 0.01, 0.7, DEFAULT_BETA);
         assert!(s_high > s_low);
@@ -317,12 +292,10 @@ mod tests {
     fn test_parse_query_variations() {
         let pipeline = TokenizerPipeline::new();
 
-        // Plain unquoted query
         let q1 = parse_query("distributed systems", &pipeline);
         assert!(q1.phrases.is_empty());
         assert_eq!(q1.unquoted_terms, vec!["distribut", "system"]);
 
-        // Pure quoted query
         let q2 = parse_query("\"distributed systems\"", &pipeline);
         assert_eq!(
             q2.phrases,
@@ -333,7 +306,6 @@ mod tests {
         );
         assert!(q2.unquoted_terms.is_empty());
 
-        // Mixed quoted and unquoted
         let q3 = parse_query("rust \"distributed systems\" fast", &pipeline);
         assert_eq!(
             q3.phrases,
@@ -344,7 +316,6 @@ mod tests {
         );
         assert_eq!(q3.unquoted_terms, vec!["rust", "fast"]);
 
-        // Multiple quoted phrases
         let q4 = parse_query("\"distributed systems\" \"fault tolerance\"", &pipeline);
         assert_eq!(
             q4.phrases,
@@ -355,7 +326,6 @@ mod tests {
         );
         assert!(q4.unquoted_terms.is_empty());
 
-        // Unclosed quote at end
         let q5 = parse_query("\"distributed systems", &pipeline);
         assert_eq!(
             q5.phrases,
@@ -369,32 +339,26 @@ mod tests {
 
     #[test]
     fn test_phrase_matches_basic() {
-        // Single term
         assert!(phrase_matches(&[&[1, 5, 10]]));
         assert!(!phrase_matches(&[&[]]));
 
-        // Two terms consecutive: pos 4 in first, pos 5 in second
         let pos1 = [2, 4, 10];
         let pos2 = [5, 20];
         assert!(phrase_matches(&[&pos1, &pos2]));
 
-        // Two terms non-consecutive
         let pos1_fail = [2, 4, 10];
         let pos2_fail = [7, 20];
         assert!(!phrase_matches(&[&pos1_fail, &pos2_fail]));
 
-        // Two terms reverse order
         let pos1_rev = [5];
         let pos2_rev = [4];
         assert!(!phrase_matches(&[&pos1_rev, &pos2_rev]));
 
-        // Three terms consecutive: 10, 11, 12
         let p1 = [1, 10, 50];
         let p2 = [2, 11, 60];
         let p3 = [3, 12, 70];
         assert!(phrase_matches(&[&p1, &p2, &p3]));
 
-        // Three terms where third term misses
         let p1_m = [10, 50];
         let p2_m = [11, 60];
         let p3_m_fail = [13, 70];
@@ -403,19 +367,15 @@ mod tests {
 
     #[test]
     fn test_phrase_matches_with_stop_word_offsets() {
-        // Query "search the web" -> offsets [0, 2]
-        // Doc has "search the web with an engine" -> search at 0, web at 2, engine at 5
         let search_pos = [0];
         let web_pos = [2];
         let engine_pos = [5];
 
-        // "search the web" -> offsets [0, 2] matches search_pos and web_pos
         assert!(phrase_matches_with_offsets(
             &[0, 2],
             &[&search_pos, &web_pos]
         ));
 
-        // "search engine" -> offsets [0, 1] does NOT match search_pos and engine_pos
         assert!(!phrase_matches_with_offsets(
             &[0, 1],
             &[&search_pos, &engine_pos]

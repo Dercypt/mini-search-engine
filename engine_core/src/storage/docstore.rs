@@ -123,6 +123,8 @@ pub struct MmapDocStore {
 impl MmapDocStore {
     pub fn open<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
         let file = File::open(path)?;
+        // SAFETY: File is opened read-only and memory-mapped for zero-copy parsing.
+        // File length is verified to exceed the 64-byte MSEDOC01 magic header.
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
         if mmap.len() < 64 || &mmap[0..8] != b"MSEDOC01" {
             return Err(std::io::Error::new(
@@ -139,11 +141,12 @@ impl MmapDocStore {
         })
     }
 
+    #[inline]
     pub fn doc_count(&self) -> u32 {
         self.doc_count
     }
 
-    pub fn get_doc_slice(&self, doc_id: u32) -> Option<&[u8]> {
+    pub fn get_doc(&self, doc_id: u32) -> Option<DocRecordRef<'_>> {
         if doc_id >= self.doc_count {
             return None;
         }
@@ -161,16 +164,14 @@ impl MmapDocStore {
                 .try_into()
                 .unwrap(),
         ) as usize;
+
         if offset + len > self.mmap.len() {
             return None;
         }
-        Some(&self.mmap[offset..offset + len])
-    }
-
-    pub fn get_doc(&self, doc_id: u32) -> Option<DocRecordRef<'_>> {
-        let slice = self.get_doc_slice(doc_id)?;
+        let slice = &self.mmap[offset..offset + len];
         let mut pos = 0;
-        if slice.len() < 2 {
+
+        if pos + 2 > slice.len() {
             return None;
         }
         let id_len = u16::from_le_bytes([slice[pos], slice[pos + 1]]) as usize;
@@ -216,27 +217,27 @@ impl MmapDocStore {
         let content = std::str::from_utf8(&slice[pos..pos + content_len]).ok()?;
         pos += content_len;
 
-        let mut links = Vec::new();
-        if pos + 4 <= slice.len() {
-            let links_count =
-                u32::from_le_bytes([slice[pos], slice[pos + 1], slice[pos + 2], slice[pos + 3]])
-                    as usize;
-            pos += 4;
-            links.reserve(links_count);
-            for _ in 0..links_count {
-                if pos + 2 > slice.len() {
-                    break;
-                }
-                let link_len = u16::from_le_bytes([slice[pos], slice[pos + 1]]) as usize;
-                pos += 2;
-                if pos + link_len > slice.len() {
-                    break;
-                }
-                if let Ok(link_str) = std::str::from_utf8(&slice[pos..pos + link_len]) {
-                    links.push(link_str);
-                }
-                pos += link_len;
+        if pos + 4 > slice.len() {
+            return None;
+        }
+        let num_links =
+            u32::from_le_bytes([slice[pos], slice[pos + 1], slice[pos + 2], slice[pos + 3]])
+                as usize;
+        pos += 4;
+
+        let mut links = Vec::with_capacity(num_links);
+        for _ in 0..num_links {
+            if pos + 2 > slice.len() {
+                return None;
             }
+            let link_len = u16::from_le_bytes([slice[pos], slice[pos + 1]]) as usize;
+            pos += 2;
+            if pos + link_len > slice.len() {
+                return None;
+            }
+            let link = std::str::from_utf8(&slice[pos..pos + link_len]).ok()?;
+            pos += link_len;
+            links.push(link);
         }
 
         Some(DocRecordRef {
@@ -246,6 +247,11 @@ impl MmapDocStore {
             content,
             links,
         })
+    }
+
+    #[inline]
+    pub fn get_content(&self, doc_id: u32) -> Option<&str> {
+        self.get_doc(doc_id).map(|d| d.content)
     }
 }
 

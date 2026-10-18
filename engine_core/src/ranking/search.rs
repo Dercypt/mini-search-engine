@@ -1,31 +1,39 @@
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use crate::ranking::bm25::{
-    DEFAULT_BETA, bm25_idf, bm25_tf_weight, final_score, parse_query, phrase_matches_with_offsets,
+    DEFAULT_BETA, ParsedQuery, bm25_idf, bm25_tf_weight, final_score, parse_query,
+    phrase_matches_with_offsets,
 };
 use crate::ranking::wand::{ScoredDoc, WandPostingCursor};
 use crate::storage::mmap::{DocMetaRef, MmapIndex, TermDictionary};
 use crate::storage::vbyte::PostingsIterator;
 use crate::tokenizer::TokenizerPipeline;
 
-pub fn search_combined_mmap<'a>(
-    query: &str,
-    index: &'a MmapIndex,
+pub struct WandSearchResult {
+    pub ranked: Vec<(u32, f64)>,
+    pub total_hits: usize,
+}
+
+pub fn execute_wand_search(
+    index: &MmapIndex,
     dictionary: &TermDictionary,
-    pipeline: &TokenizerPipeline,
+    parsed_query: &ParsedQuery,
     alpha: f64,
     beta: f64,
     top_k: usize,
-) -> Vec<(DocMetaRef<'a>, f64)> {
+) -> WandSearchResult {
     if top_k == 0 {
-        return Vec::new();
+        return WandSearchResult {
+            ranked: Vec::new(),
+            total_hits: 0,
+        };
     }
-    let k1 = 1.5;
-    let b = 0.75;
-    let parsed_query = parse_query(query, pipeline);
     let all_terms = parsed_query.all_terms();
     if all_terms.is_empty() {
-        return Vec::new();
+        return WandSearchResult {
+            ranked: Vec::new(),
+            total_hits: 0,
+        };
     }
 
     // Filter documents by phrase requirements if any phrases exist
@@ -52,7 +60,10 @@ pub fn search_combined_mmap<'a>(
         }
 
         if !all_found {
-            return Vec::new();
+            return WandSearchResult {
+                ranked: Vec::new(),
+                total_hits: 0,
+            };
         }
 
         let offsets: Vec<usize> = phrase.iter().map(|(off, _)| *off).collect();
@@ -89,11 +100,18 @@ pub fn search_combined_mmap<'a>(
         if let Some(ref docs) = phrase_matching_docs
             && docs.is_empty()
         {
-            return Vec::new();
+            return WandSearchResult {
+                ranked: Vec::new(),
+                total_hits: 0,
+            };
         }
     }
 
+    let k1 = 1.5;
+    let b = 0.75;
     let n = index.total_docs as f64;
+    let alpha = alpha.clamp(0.0, 1.0);
+
     let pr_max = if alpha < 1.0 {
         (1.0 - alpha) * (1.0 + beta)
     } else {
@@ -101,7 +119,7 @@ pub fn search_combined_mmap<'a>(
     };
 
     // Initialize WAND cursors for all query terms
-    let mut cursors: Vec<WandPostingCursor<'a>> = Vec::with_capacity(all_terms.len());
+    let mut cursors: Vec<WandPostingCursor> = Vec::with_capacity(all_terms.len());
     for term in &all_terms {
         if let Some(term_idx) = dictionary.get(term)
             && let Some(entry) = index.get_term_entry(term_idx as usize)
@@ -122,17 +140,19 @@ pub fn search_combined_mmap<'a>(
     }
 
     if cursors.is_empty() {
-        return Vec::new();
+        return WandSearchResult {
+            ranked: Vec::new(),
+            total_hits: 0,
+        };
     }
 
     let mut heap: BinaryHeap<ScoredDoc> = BinaryHeap::with_capacity(top_k + 1);
     let mut threshold = f64::NEG_INFINITY;
+    let mut matching_docs: HashSet<u32> = HashSet::new();
 
     while !cursors.is_empty() {
-        // Sort cursors by current_doc_id
         cursors.sort_unstable_by_key(|c| c.current_doc_id);
 
-        // Find pivot term where accumulated upper bound > threshold - pr_max
         let score_limit = threshold - pr_max;
         let mut accum = 0.0;
         let mut pivot_idx = None;
@@ -146,7 +166,6 @@ pub fn search_combined_mmap<'a>(
         }
 
         let Some(p) = pivot_idx else {
-            // No remaining document can beat the current threshold
             break;
         };
 
@@ -159,6 +178,7 @@ pub fn search_combined_mmap<'a>(
                 .is_none_or(|docs| docs.contains(&target_doc));
 
             if is_allowed {
+                matching_docs.insert(target_doc);
                 let doc_len = index.get_doc_length(target_doc) as f64;
                 let mut bm25_total = 0.0;
 
@@ -199,24 +219,53 @@ pub fn search_combined_mmap<'a>(
                 }
             }
         } else {
-            // Skip uncompetitive documents: advance cursor 0 to at least pivot_doc
+            let doc_id = cursors[0].current_doc_id;
+            let is_allowed = phrase_matching_docs
+                .as_ref()
+                .is_none_or(|docs| docs.contains(&doc_id));
+            if is_allowed {
+                matching_docs.insert(doc_id);
+            }
             cursors[0].advance_to(pivot_doc);
         }
 
         cursors.retain(|c| c.has_more);
     }
 
-    let mut ranked: Vec<ScoredDoc> = heap.into_vec();
+    let mut ranked: Vec<(u32, f64)> = heap
+        .into_iter()
+        .map(|hit| (hit.doc_id, hit.score))
+        .collect();
     ranked.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
+        b.1.partial_cmp(&a.1)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.doc_id.cmp(&b.doc_id))
+            .then_with(|| a.0.cmp(&b.0))
     });
 
-    ranked
+    WandSearchResult {
+        ranked,
+        total_hits: matching_docs.len(),
+    }
+}
+
+pub fn search_combined_mmap<'a>(
+    query: &str,
+    index: &'a MmapIndex,
+    dictionary: &TermDictionary,
+    pipeline: &TokenizerPipeline,
+    alpha: f64,
+    beta: f64,
+    top_k: usize,
+) -> Vec<(DocMetaRef<'a>, f64)> {
+    if top_k == 0 {
+        return Vec::new();
+    }
+    let parsed_query = parse_query(query, pipeline);
+    let result = execute_wand_search(index, dictionary, &parsed_query, alpha, beta, top_k);
+    result
+        .ranked
         .into_iter()
-        .filter_map(|hit| index.get_doc_meta(hit.doc_id).map(|meta| (meta, hit.score)))
+        .filter_map(|(doc_id, score)| index.get_doc_meta(doc_id).map(|meta| (meta, score)))
         .collect()
 }
 
@@ -241,8 +290,15 @@ mod tests {
 
     #[test]
     fn test_quoted_query_search_integration() {
-        let test_index_path = "target/test_quoted_search_index.bin";
-        let test_fst_path = "target/test_quoted_search_dict.fst";
+        let temp_dir = std::env::temp_dir();
+        let test_index_path = temp_dir.join(format!(
+            "test_quoted_search_index_{}.bin",
+            std::process::id()
+        ));
+        let test_fst_path = temp_dir.join(format!(
+            "test_quoted_search_dict_{}.fst",
+            std::process::id()
+        ));
 
         let total_docs = 3;
         let avg_doc_length = 10.0;
@@ -311,7 +367,7 @@ mod tests {
         sorted_terms.sort();
 
         BinaryIndexWriter::write_index(
-            test_index_path,
+            &test_index_path,
             total_docs,
             avg_doc_length,
             &doc_lengths,
@@ -322,7 +378,7 @@ mod tests {
         )
         .expect("write_index failed");
 
-        let fst_file = File::create(test_fst_path).expect("create fst failed");
+        let fst_file = File::create(&test_fst_path).expect("create fst failed");
         let fst_writer = BufWriter::new(fst_file);
         let mut builder = MapBuilder::new(fst_writer).expect("mapbuilder failed");
         for (term_idx, term) in sorted_terms.iter().enumerate() {
@@ -332,8 +388,8 @@ mod tests {
         }
         builder.finish().expect("finish fst");
 
-        let mmap_index = MmapIndex::open(test_index_path).expect("open index failed");
-        let dictionary = TermDictionary::open(test_fst_path).expect("open dict failed");
+        let mmap_index = MmapIndex::open(&test_index_path).expect("open index failed");
+        let dictionary = TermDictionary::open(&test_fst_path).expect("open dict failed");
         let pipeline = TokenizerPipeline::new();
 
         // 1. Quoted query: "distributed systems" -> only doc 0 matches
@@ -379,8 +435,11 @@ mod tests {
 
     #[test]
     fn test_wand_multi_term_top_k_pruning() {
-        let test_index_path = "target/test_wand_prune_index.bin";
-        let test_fst_path = "target/test_wand_prune_dict.fst";
+        let temp_dir = std::env::temp_dir();
+        let test_index_path =
+            temp_dir.join(format!("test_wand_prune_index_{}.bin", std::process::id()));
+        let test_fst_path =
+            temp_dir.join(format!("test_wand_prune_dict_{}.fst", std::process::id()));
 
         let total_docs = 6;
         let avg_doc_length = 20.0;
@@ -463,7 +522,7 @@ mod tests {
         sorted_terms.sort();
 
         BinaryIndexWriter::write_index(
-            test_index_path,
+            &test_index_path,
             total_docs,
             avg_doc_length,
             &doc_lengths,
@@ -474,7 +533,7 @@ mod tests {
         )
         .expect("write_index failed");
 
-        let fst_file = File::create(test_fst_path).expect("create fst failed");
+        let fst_file = File::create(&test_fst_path).expect("create fst failed");
         let fst_writer = BufWriter::new(fst_file);
         let mut builder = MapBuilder::new(fst_writer).expect("mapbuilder failed");
         for (term_idx, term) in sorted_terms.iter().enumerate() {
@@ -484,11 +543,10 @@ mod tests {
         }
         builder.finish().expect("finish fst");
 
-        let mmap_index = MmapIndex::open(test_index_path).expect("open index failed");
-        let dictionary = TermDictionary::open(test_fst_path).expect("open dict failed");
+        let mmap_index = MmapIndex::open(&test_index_path).expect("open index failed");
+        let dictionary = TermDictionary::open(&test_fst_path).expect("open dict failed");
         let pipeline = TokenizerPipeline::new();
 
-        // Query: "alpha beta gamma" with top_k = 2
         let top2_res = search_combined_mmap(
             "alpha beta gamma",
             &mmap_index,
@@ -503,7 +561,6 @@ mod tests {
         assert_eq!(top2_res[1].0.hex_id, "doc1");
         assert!(top2_res[0].1 > top2_res[1].1);
 
-        // Query with top_k = 6 -> all 6 docs returned in order
         let all_res = search_combined_mmap(
             "alpha beta gamma",
             &mmap_index,
@@ -517,12 +574,9 @@ mod tests {
         assert_eq!(all_res[0].0.hex_id, "doc0");
         assert_eq!(all_res[1].0.hex_id, "doc1");
 
-        // Top 2 scores match exactly between top_k=2 and top_k=6
         assert!((top2_res[0].1 - all_res[0].1).abs() < 1e-9);
         assert!((top2_res[1].1 - all_res[1].1).abs() < 1e-9);
 
-        // Query with PageRank incorporated (alpha = 0.7, DEFAULT_BETA)
-        // Verify positive scores and that WAND dynamic pruning yields exact top-2 hits matching exhaustive scan
         let pr_top2 = search_combined_mmap(
             "alpha beta gamma",
             &mmap_index,

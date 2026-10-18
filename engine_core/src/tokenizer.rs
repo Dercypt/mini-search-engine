@@ -227,7 +227,6 @@ mod tests {
     fn test_tokenize_preserves_original_word_positions() {
         let pipeline = TokenizerPipeline::new();
         let tokens = pipeline.tokenize("search the web with an engine");
-        // "search" is at 0, "web" is at 2, "engine" is at 5
         assert_eq!(
             tokens,
             vec![
