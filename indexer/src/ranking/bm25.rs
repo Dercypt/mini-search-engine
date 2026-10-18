@@ -44,7 +44,7 @@ pub fn bm25_score(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedQuery {
-    pub phrases: Vec<Vec<String>>,
+    pub phrases: Vec<Vec<(usize, String)>>,
     pub unquoted_terms: Vec<String>,
 }
 
@@ -52,7 +52,7 @@ impl ParsedQuery {
     pub fn all_terms(&self) -> Vec<String> {
         let mut terms = Vec::new();
         for phrase in &self.phrases {
-            for term in phrase {
+            for (_pos, term) in phrase {
                 if !terms.contains(term) {
                     terms.push(term.clone());
                 }
@@ -100,7 +100,11 @@ pub fn parse_query(query: &str, pipeline: &TokenizerPipeline) -> ParsedQuery {
         }
     }
 
-    let unquoted_terms = pipeline.tokenize(&unquoted_text);
+    let unquoted_terms = pipeline
+        .tokenize(&unquoted_text)
+        .into_iter()
+        .map(|(_, term)| term)
+        .collect();
 
     ParsedQuery {
         phrases,
@@ -108,21 +112,26 @@ pub fn parse_query(query: &str, pipeline: &TokenizerPipeline) -> ParsedQuery {
     }
 }
 
-pub fn phrase_matches(positions_list: &[&[u32]]) -> bool {
+pub fn phrase_matches_with_offsets(offsets: &[usize], positions_list: &[&[u32]]) -> bool {
     if positions_list.is_empty() {
         return true;
     }
     if positions_list.len() == 1 {
         return !positions_list[0].is_empty();
     }
+    if offsets.len() != positions_list.len() {
+        return false;
+    }
+    let base_offset = offsets[0];
     let mut current_starts: Vec<u32> = positions_list[0].to_vec();
-    for (offset, next_positions) in positions_list.iter().skip(1).enumerate() {
-        let expected_offset = (offset + 1) as u32;
+    for (k, next_positions) in positions_list.iter().skip(1).enumerate() {
+        let word_offset = offsets[k + 1];
+        let expected_delta = word_offset.saturating_sub(base_offset) as u32;
         let mut next_starts = Vec::new();
         let mut i = 0;
         let mut j = 0;
         while i < current_starts.len() && j < next_positions.len() {
-            let target = current_starts[i].saturating_add(expected_offset);
+            let target = current_starts[i].saturating_add(expected_delta);
             if next_positions[j] == target {
                 next_starts.push(current_starts[i]);
                 i += 1;
@@ -139,6 +148,11 @@ pub fn phrase_matches(positions_list: &[&[u32]]) -> bool {
         }
     }
     !current_starts.is_empty()
+}
+
+pub fn phrase_matches(positions_list: &[&[u32]]) -> bool {
+    let offsets: Vec<usize> = (0..positions_list.len()).collect();
+    phrase_matches_with_offsets(&offsets, positions_list)
 }
 
 #[cfg(test)]
@@ -310,25 +324,46 @@ mod tests {
 
         // Pure quoted query
         let q2 = parse_query("\"distributed systems\"", &pipeline);
-        assert_eq!(q2.phrases, vec![vec!["distribut", "system"]]);
+        assert_eq!(
+            q2.phrases,
+            vec![vec![
+                (0, "distribut".to_string()),
+                (1, "system".to_string()),
+            ]]
+        );
         assert!(q2.unquoted_terms.is_empty());
 
         // Mixed quoted and unquoted
         let q3 = parse_query("rust \"distributed systems\" fast", &pipeline);
-        assert_eq!(q3.phrases, vec![vec!["distribut", "system"]]);
+        assert_eq!(
+            q3.phrases,
+            vec![vec![
+                (0, "distribut".to_string()),
+                (1, "system".to_string()),
+            ]]
+        );
         assert_eq!(q3.unquoted_terms, vec!["rust", "fast"]);
 
         // Multiple quoted phrases
         let q4 = parse_query("\"distributed systems\" \"fault tolerance\"", &pipeline);
         assert_eq!(
             q4.phrases,
-            vec![vec!["distribut", "system"], vec!["fault", "toler"]]
+            vec![
+                vec![(0, "distribut".to_string()), (1, "system".to_string())],
+                vec![(0, "fault".to_string()), (1, "toler".to_string())]
+            ]
         );
         assert!(q4.unquoted_terms.is_empty());
 
         // Unclosed quote at end
         let q5 = parse_query("\"distributed systems", &pipeline);
-        assert_eq!(q5.phrases, vec![vec!["distribut", "system"]]);
+        assert_eq!(
+            q5.phrases,
+            vec![vec![
+                (0, "distribut".to_string()),
+                (1, "system".to_string()),
+            ]]
+        );
         assert!(q5.unquoted_terms.is_empty());
     }
 
@@ -364,5 +399,26 @@ mod tests {
         let p2_m = [11, 60];
         let p3_m_fail = [13, 70];
         assert!(!phrase_matches(&[&p1_m, &p2_m, &p3_m_fail]));
+    }
+
+    #[test]
+    fn test_phrase_matches_with_stop_word_offsets() {
+        // Query "search the web" -> offsets [0, 2]
+        // Doc has "search the web with an engine" -> search at 0, web at 2, engine at 5
+        let search_pos = [0];
+        let web_pos = [2];
+        let engine_pos = [5];
+
+        // "search the web" -> offsets [0, 2] matches search_pos and web_pos
+        assert!(phrase_matches_with_offsets(
+            &[0, 2],
+            &[&search_pos, &web_pos]
+        ));
+
+        // "search engine" -> offsets [0, 1] does NOT match search_pos and engine_pos
+        assert!(!phrase_matches_with_offsets(
+            &[0, 1],
+            &[&search_pos, &engine_pos]
+        ));
     }
 }

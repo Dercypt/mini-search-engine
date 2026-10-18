@@ -143,11 +143,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         doc_links.push(doc.links.iter().map(|s| s.to_string()).collect());
 
         let title_terms = pipeline.tokenize(doc.title);
+        let title_word_count = pipeline.word_count(doc.title);
         let content_terms = pipeline.tokenize(doc.content);
 
-        let mut all_terms = Vec::with_capacity(title_terms.len() + content_terms.len());
-        all_terms.extend(title_terms);
-        all_terms.extend(content_terms);
+        let mut all_terms: Vec<(u32, String)> =
+            Vec::with_capacity(title_terms.len() + content_terms.len());
+        for (pos, term) in title_terms {
+            all_terms.push((pos as u32, term));
+        }
+        for (pos, term) in content_terms {
+            all_terms.push(((title_word_count + pos) as u32, term));
+        }
 
         let doc_length = all_terms.len() as u32;
         total_terms += doc_length as usize;
@@ -163,8 +169,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
 
         let mut term_positions: HashMap<String, Vec<u32>> = HashMap::new();
-        for (pos, term) in all_terms.into_iter().enumerate() {
-            term_positions.entry(term).or_default().push(pos as u32);
+        for (pos, term) in all_terms {
+            term_positions.entry(term).or_default().push(pos);
         }
 
         for (term, positions) in term_positions {

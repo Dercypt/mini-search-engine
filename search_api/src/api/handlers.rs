@@ -14,7 +14,7 @@ use crate::api::state::{
 };
 use crate::ranking::{
     DEFAULT_ALPHA, DEFAULT_BETA, ScoredDoc, WandPostingCursor, bm25_idf, bm25_tf_weight,
-    final_score, generate_dynamic_snippet, parse_query, phrase_matches,
+    final_score, generate_dynamic_snippet, parse_query, phrase_matches_with_offsets,
 };
 use crate::storage::PostingsIterator;
 
@@ -98,7 +98,7 @@ pub async fn search_handler(
         }
         let mut term_postings = Vec::with_capacity(phrase.len());
         let mut all_found = true;
-        for term in phrase {
+        for (_offset, term) in phrase {
             if let Some(term_idx) = state.dictionary.get(term)
                 && let Some(entry) = state.index.get_term_entry(term_idx as usize)
             {
@@ -117,6 +117,7 @@ pub async fn search_handler(
             break;
         }
 
+        let offsets: Vec<usize> = phrase.iter().map(|(off, _)| *off).collect();
         let mut matching_in_phrase = HashSet::new();
         if let Some(first_map) = term_postings.first() {
             for (&doc_id, first_positions) in first_map {
@@ -131,7 +132,7 @@ pub async fn search_handler(
                         break;
                     }
                 }
-                if in_all && phrase_matches(&doc_positions) {
+                if in_all && phrase_matches_with_offsets(&offsets, &doc_positions) {
                     matching_in_phrase.insert(doc_id);
                 }
             }

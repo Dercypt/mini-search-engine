@@ -1,7 +1,7 @@
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use crate::ranking::bm25::{
-    DEFAULT_BETA, bm25_idf, bm25_tf_weight, final_score, parse_query, phrase_matches,
+    DEFAULT_BETA, bm25_idf, bm25_tf_weight, final_score, parse_query, phrase_matches_with_offsets,
 };
 use crate::ranking::wand::{ScoredDoc, WandPostingCursor};
 use crate::storage::mmap::{DocMetaRef, MmapIndex, TermDictionary};
@@ -37,7 +37,7 @@ pub fn search_combined_mmap<'a>(
         }
         let mut term_postings = Vec::with_capacity(phrase.len());
         let mut all_found = true;
-        for term in phrase {
+        for (_offset, term) in phrase {
             if let Some(term_idx) = dictionary.get(term)
                 && let Some(entry) = index.get_term_entry(term_idx as usize)
             {
@@ -55,6 +55,7 @@ pub fn search_combined_mmap<'a>(
             return Vec::new();
         }
 
+        let offsets: Vec<usize> = phrase.iter().map(|(off, _)| *off).collect();
         let mut matching_in_phrase = HashSet::new();
         if let Some(first_map) = term_postings.first() {
             for (&doc_id, first_positions) in first_map {
@@ -69,7 +70,7 @@ pub fn search_combined_mmap<'a>(
                         break;
                     }
                 }
-                if in_all && phrase_matches(&doc_positions) {
+                if in_all && phrase_matches_with_offsets(&offsets, &doc_positions) {
                     matching_in_phrase.insert(doc_id);
                 }
             }

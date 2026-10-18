@@ -204,12 +204,44 @@ impl TokenizerPipeline {
         }
     }
 
-    pub fn tokenize(&self, text: &str) -> Vec<String> {
+    pub fn tokenize(&self, text: &str) -> Vec<(usize, String)> {
         let cleaned = self.regex.replace_all(text, " ").to_lowercase();
         cleaned
             .split_whitespace()
-            .filter(|token| token.len() > 1 && !self.stop_words.contains(token))
-            .map(|token| self.stemmer.stem(token).to_string())
+            .enumerate()
+            .filter(|(_idx, token)| token.len() > 1 && !self.stop_words.contains(token))
+            .map(|(idx, token)| (idx, self.stemmer.stem(token).to_string()))
             .collect()
+    }
+
+    pub fn word_count(&self, text: &str) -> usize {
+        self.regex.replace_all(text, " ").split_whitespace().count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tokenize_preserves_original_word_positions() {
+        let pipeline = TokenizerPipeline::new();
+        let tokens = pipeline.tokenize("search the web with an engine");
+        // "search" is at 0, "web" is at 2, "engine" is at 5
+        assert_eq!(
+            tokens,
+            vec![
+                (0, "search".to_string()),
+                (2, "web".to_string()),
+                (5, "engin".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_tokenize_stop_word_only_phrase_is_empty() {
+        let pipeline = TokenizerPipeline::new();
+        let tokens = pipeline.tokenize("to be or not to be");
+        assert!(tokens.is_empty());
     }
 }
