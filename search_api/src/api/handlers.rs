@@ -310,12 +310,11 @@ pub async fn search_handler(
         None
     };
 
+    // Documented: total_hits tracks evaluated matching documents under WAND pruning,
+    // while ranked holds top-k scored documents. Pagination is safely bounded
+    // against ranked.len() to guarantee no runtime slice out-of-bounds panics.
     let offset = (page - 1) * limit;
-    let paged_results = if offset < total_hits {
-        ranked[offset..(offset + limit).min(total_hits)].to_vec()
-    } else {
-        Vec::new()
-    };
+    let paged_results = paginate_ranked_results(&ranked, page, limit);
 
     let mut hits = Vec::with_capacity(paged_results.len());
     let raw_tokens: Vec<String> = query_str
@@ -360,4 +359,66 @@ pub async fn search_handler(
             results: hits,
         }),
     )
+}
+
+#[inline]
+fn paginate_ranked_results(ranked: &[(u32, f64)], page: usize, limit: usize) -> Vec<(u32, f64)> {
+    let offset = (page.saturating_sub(1)) * limit;
+    if offset < ranked.len() {
+        ranked[offset..(offset + limit).min(ranked.len())].to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_paginate_ranked_results_bounds() {
+        let ranked: Vec<(u32, f64)> = (0..10).map(|i| (i, 1.0 / (i as f64 + 1.0))).collect();
+
+        // Exact first page
+        let p1 = paginate_ranked_results(&ranked, 1, 5);
+        assert_eq!(p1.len(), 5);
+        assert_eq!(p1[0].0, 0);
+        assert_eq!(p1[4].0, 4);
+
+        // Second page
+        let p2 = paginate_ranked_results(&ranked, 2, 5);
+        assert_eq!(p2.len(), 5);
+        assert_eq!(p2[0].0, 5);
+        assert_eq!(p2[4].0, 9);
+
+        // Third page out of bounds -> empty, no panic
+        let p3 = paginate_ranked_results(&ranked, 3, 5);
+        assert!(p3.is_empty());
+
+        // Partial final page: page 2 with limit 7 (ranked has 10 items, offset 7, limit 7)
+        let p_partial = paginate_ranked_results(&ranked, 2, 7);
+        assert_eq!(p_partial.len(), 3);
+        assert_eq!(p_partial[0].0, 7);
+        assert_eq!(p_partial[2].0, 9);
+
+        // Empty ranked
+        let empty_ranked: Vec<(u32, f64)> = Vec::new();
+        let p_empty = paginate_ranked_results(&empty_ranked, 1, 10);
+        assert!(p_empty.is_empty());
+    }
+
+    #[test]
+    fn test_paginate_ranked_results_when_total_hits_exceeds_heap() {
+        // Simulates WAND pruning where 50 candidates were evaluated (total_hits = 50),
+        // but only top 5 were retained in heap (ranked.len() = 5).
+        let ranked: Vec<(u32, f64)> = (0..5).map(|i| (i, 10.0 - i as f64)).collect();
+
+        // Requesting page 2 with limit 5 (offset 5 == ranked.len())
+        let p2 = paginate_ranked_results(&ranked, 2, 5);
+        assert!(p2.is_empty());
+
+        // Requesting page 1 with limit 10 (offset 0, offset + limit = 10 > ranked.len())
+        let p1 = paginate_ranked_results(&ranked, 1, 10);
+        assert_eq!(p1.len(), 5);
+    }
 }
