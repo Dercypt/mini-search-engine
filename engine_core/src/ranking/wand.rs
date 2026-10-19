@@ -111,23 +111,19 @@ mod tests {
     #[test]
     fn test_wand_posting_cursor_advance_and_read() {
         let mut buf = Vec::new();
-        // doc 5, tf 1, pos [0]
         encode_vbyte(5, &mut buf);
         encode_vbyte(1, &mut buf);
         encode_vbyte(0, &mut buf);
 
-        // doc 12 (delta 7), tf 2, pos [3, 8]
         encode_vbyte(7, &mut buf);
         encode_vbyte(2, &mut buf);
         encode_vbyte(3, &mut buf);
         encode_vbyte(5, &mut buf);
 
-        // doc 30 (delta 18), tf 1, pos [10]
         encode_vbyte(18, &mut buf);
         encode_vbyte(1, &mut buf);
         encode_vbyte(10, &mut buf);
 
-        // doc 45 (delta 15), tf 1, pos [2]
         encode_vbyte(15, &mut buf);
         encode_vbyte(1, &mut buf);
         encode_vbyte(2, &mut buf);
@@ -137,21 +133,73 @@ mod tests {
         assert_eq!(cursor.current_doc_id, 5);
         assert_eq!(cursor.current_tf, 1);
 
-        // Advance to doc 20 -> should land on doc 30
         assert!(cursor.advance_to(20));
         assert_eq!(cursor.current_doc_id, 30);
         assert_eq!(cursor.current_tf, 1);
 
-        // Advance to 30 -> stays on 30
         assert!(cursor.advance_to(30));
         assert_eq!(cursor.current_doc_id, 30);
 
-        // Advance to 40 -> lands on 45
         assert!(cursor.advance_to(40));
         assert_eq!(cursor.current_doc_id, 45);
 
-        // Advance past all -> ends
         assert!(!cursor.advance_to(50));
         assert!(!cursor.has_more);
+    }
+
+    #[test]
+    fn test_wand_cursor_tracking_distinct_matching_docs() {
+        use std::collections::HashSet;
+
+        let mut buf1 = Vec::new();
+        encode_vbyte(1, &mut buf1);
+        encode_vbyte(1, &mut buf1);
+        encode_vbyte(0, &mut buf1);
+
+        encode_vbyte(4, &mut buf1);
+        encode_vbyte(1, &mut buf1);
+        encode_vbyte(0, &mut buf1);
+
+        encode_vbyte(5, &mut buf1);
+        encode_vbyte(1, &mut buf1);
+        encode_vbyte(0, &mut buf1);
+
+        let mut buf2 = Vec::new();
+        encode_vbyte(5, &mut buf2);
+        encode_vbyte(1, &mut buf2);
+        encode_vbyte(0, &mut buf2);
+
+        encode_vbyte(15, &mut buf2);
+        encode_vbyte(1, &mut buf2);
+        encode_vbyte(0, &mut buf2);
+
+        let c1 = WandPostingCursor::new(&buf1, 3, 1.0, 1.0);
+        let c2 = WandPostingCursor::new(&buf2, 2, 1.0, 1.0);
+        let mut cursors = vec![c1, c2];
+
+        let mut matching_docs = HashSet::new();
+
+        while !cursors.is_empty() {
+            cursors.sort_unstable_by_key(|c| c.current_doc_id);
+            let pivot_doc = cursors[0].current_doc_id;
+
+            if cursors.iter().all(|c| c.current_doc_id == pivot_doc) {
+                matching_docs.insert(pivot_doc);
+                for c in cursors.iter_mut() {
+                    c.read_next();
+                }
+            } else {
+                let doc_id = cursors[0].current_doc_id;
+                matching_docs.insert(doc_id);
+                cursors[0].read_next();
+            }
+            cursors.retain(|c| c.has_more);
+        }
+
+        assert_eq!(matching_docs.len(), 4);
+        assert!(matching_docs.contains(&1));
+        assert!(matching_docs.contains(&5));
+        assert!(matching_docs.contains(&10));
+        assert!(matching_docs.contains(&20));
     }
 }

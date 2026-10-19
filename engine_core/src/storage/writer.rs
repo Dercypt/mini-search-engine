@@ -1,5 +1,5 @@
-use crate::storage::mmap::TermEntry;
-use crate::storage::vbyte::{Posting, encode_postings};
+use super::mmap::TermEntry;
+use super::vbyte::{Posting, encode_postings};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
@@ -179,7 +179,8 @@ mod tests {
 
     #[test]
     fn test_binary_index_pagerank_roundtrip() {
-        let test_path = "target/test_pagerank_index.bin";
+        let temp_dir = std::env::temp_dir();
+        let test_path = temp_dir.join(format!("test_pagerank_index_{}.bin", std::process::id()));
         let total_docs = 3;
         let avg_doc_length = 50.0;
         let doc_lengths = vec![40, 50, 60];
@@ -222,7 +223,7 @@ mod tests {
         );
 
         BinaryIndexWriter::write_index(
-            test_path,
+            &test_path,
             total_docs,
             avg_doc_length,
             &doc_lengths,
@@ -233,7 +234,7 @@ mod tests {
         )
         .expect("write_index failed");
 
-        let mmap_index = MmapIndex::open(test_path).expect("open failed");
+        let mmap_index = MmapIndex::open(&test_path).expect("open failed");
         assert_eq!(mmap_index.total_docs, total_docs);
         assert!((mmap_index.get_pagerank(0) - 0.2).abs() < 1e-9);
         assert!((mmap_index.get_pagerank(1) - 0.5).abs() < 1e-9);

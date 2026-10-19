@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-CRATES=("crawler" "indexer" "search_api")
+CRATES=("engine_core" "crawler" "indexer" "search_api")
 
 echo "=================================================="
 echo " Starting Verification Pipeline (mini-search-engine)"

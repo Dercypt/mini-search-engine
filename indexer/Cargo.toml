@@ -10,3 +10,4 @@ regex = "1.10"
 rust-stemmers = "1.2"
 fst = { version = "0.4", features = ["levenshtein"] }
 memmap2 = "0.9"
+engine_core = { path = "../engine_core" }

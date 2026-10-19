@@ -1,7 +1,5 @@
 pub mod api;
-pub mod ranking;
-pub mod storage;
-pub mod tokenizer;
+pub use engine_core::{ranking, storage, tokenizer};
 
 use std::net::SocketAddr;
 use std::path::Path;

@@ -1,19 +1,20 @@
 use fst::automaton::{Levenshtein, Str};
-use fst::{Automaton, IntoStreamer, Map, Streamer};
+use fst::{Automaton, IntoStreamer, Map, MapBuilder, Streamer};
 use std::fs::File;
+use std::io::BufWriter;
 use std::path::Path;
-
-pub struct TermEntry {
-    pub postings_offset: u64,
-    pub postings_len: u32,
-    pub doc_freq: u32,
-}
 
 pub struct DocMetaRef<'a> {
     pub hex_id: &'a str,
     pub url: &'a str,
     pub title: &'a str,
     pub pagerank: f64,
+}
+
+pub struct TermEntry {
+    pub postings_offset: u64,
+    pub postings_len: u32,
+    pub doc_freq: u32,
 }
 
 pub struct MmapIndex {
@@ -33,6 +34,8 @@ pub struct MmapIndex {
 impl MmapIndex {
     pub fn open<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
         let file = File::open(path)?;
+        // SAFETY: The index file is opened read-only and mapped into memory.
+        // File boundary and the MSEIDX01 128-byte header are verified before any internal slicing.
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
         if mmap.len() < 128 || &mmap[0..8] != b"MSEIDX01" {
             return Err(std::io::Error::new(
@@ -76,7 +79,11 @@ impl MmapIndex {
             return 0;
         }
         let off = self.doc_lengths_offset + (doc_id as usize) * 4;
-        u32::from_le_bytes(self.mmap[off..off + 4].try_into().unwrap())
+        self.mmap
+            .get(off..off + 4)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u32::from_le_bytes)
+            .unwrap_or(0)
     }
 
     #[inline]
@@ -89,14 +96,17 @@ impl MmapIndex {
             };
         }
         let off = self.pagerank_offset + (doc_id as usize) * 8;
-        if off + 8 > self.mmap.len() {
-            return if self.total_docs > 0 {
-                1.0 / (self.total_docs as f64)
-            } else {
-                0.0
-            };
-        }
-        f64::from_le_bytes(self.mmap[off..off + 8].try_into().unwrap())
+        self.mmap
+            .get(off..off + 8)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(f64::from_le_bytes)
+            .unwrap_or_else(|| {
+                if self.total_docs > 0 {
+                    1.0 / (self.total_docs as f64)
+                } else {
+                    0.0
+                }
+            })
     }
 
     pub fn get_doc_meta(&self, doc_id: u32) -> Option<DocMetaRef<'_>> {
@@ -104,24 +114,24 @@ impl MmapIndex {
             return None;
         }
         let idx_off = self.doc_meta_index_offset + (doc_id as usize) * 8;
-        let meta_rel_start =
-            u64::from_le_bytes(self.mmap[idx_off..idx_off + 8].try_into().unwrap()) as usize;
-        let meta_rel_end =
-            u64::from_le_bytes(self.mmap[idx_off + 8..idx_off + 16].try_into().unwrap()) as usize;
+        let start_bytes = self.mmap.get(idx_off..idx_off + 8)?.try_into().ok()?;
+        let end_bytes = self.mmap.get(idx_off + 8..idx_off + 16)?.try_into().ok()?;
+        let meta_rel_start = u64::from_le_bytes(start_bytes) as usize;
+        let meta_rel_end = u64::from_le_bytes(end_bytes) as usize;
 
-        let start = self.doc_meta_data_offset + meta_rel_start;
-        let end = self.doc_meta_data_offset + meta_rel_end;
-        if end > self.mmap.len() || start >= end {
+        let start = self.doc_meta_data_offset.checked_add(meta_rel_start)?;
+        let end = self.doc_meta_data_offset.checked_add(meta_rel_end)?;
+        if start >= end {
             return None;
         }
-        let slice = &self.mmap[start..end];
+        let slice = self.mmap.get(start..end)?;
         let mut pos = 0;
         if slice.len() < 2 {
             return None;
         }
         let hex_id_len = u16::from_le_bytes([slice[pos], slice[pos + 1]]) as usize;
         pos += 2;
-        let hex_id = std::str::from_utf8(&slice[pos..pos + hex_id_len]).ok()?;
+        let hex_id = std::str::from_utf8(slice.get(pos..pos + hex_id_len)?).ok()?;
         pos += hex_id_len;
 
         if pos + 2 > slice.len() {
@@ -129,7 +139,7 @@ impl MmapIndex {
         }
         let url_len = u16::from_le_bytes([slice[pos], slice[pos + 1]]) as usize;
         pos += 2;
-        let url = std::str::from_utf8(&slice[pos..pos + url_len]).ok()?;
+        let url = std::str::from_utf8(slice.get(pos..pos + url_len)?).ok()?;
         pos += url_len;
 
         if pos + 2 > slice.len() {
@@ -137,7 +147,7 @@ impl MmapIndex {
         }
         let title_len = u16::from_le_bytes([slice[pos], slice[pos + 1]]) as usize;
         pos += 2;
-        let title = std::str::from_utf8(&slice[pos..pos + title_len]).ok()?;
+        let title = std::str::from_utf8(slice.get(pos..pos + title_len)?).ok()?;
 
         let pagerank = self.get_pagerank(doc_id);
 
@@ -155,12 +165,10 @@ impl MmapIndex {
             return None;
         }
         let off = self.terms_table_offset + term_idx * 16;
-        if off + 16 > self.mmap.len() {
-            return None;
-        }
-        let postings_offset = u64::from_le_bytes(self.mmap[off..off + 8].try_into().unwrap());
-        let postings_len = u32::from_le_bytes(self.mmap[off + 8..off + 12].try_into().unwrap());
-        let doc_freq = u32::from_le_bytes(self.mmap[off + 12..off + 16].try_into().unwrap());
+        let slice = self.mmap.get(off..off + 16)?;
+        let postings_offset = u64::from_le_bytes(slice[0..8].try_into().unwrap());
+        let postings_len = u32::from_le_bytes(slice[8..12].try_into().unwrap());
+        let doc_freq = u32::from_le_bytes(slice[12..16].try_into().unwrap());
         Some(TermEntry {
             postings_offset,
             postings_len,
@@ -172,7 +180,7 @@ impl MmapIndex {
     pub fn get_postings_slice(&self, entry: &TermEntry) -> &[u8] {
         let start = self.postings_offset + entry.postings_offset as usize;
         let end = start + entry.postings_len as usize;
-        &self.mmap[start..end]
+        self.mmap.get(start..end).unwrap_or(&[])
     }
 
     pub fn get_term_str(&self, term_idx: usize) -> Option<&str> {
@@ -180,15 +188,16 @@ impl MmapIndex {
             return None;
         }
         let off = self.terms_strings_offset + term_idx * 4;
-        let s_start = u32::from_le_bytes(self.mmap[off..off + 4].try_into().unwrap()) as usize;
-        let s_end = u32::from_le_bytes(self.mmap[off + 4..off + 8].try_into().unwrap()) as usize;
+        let s_start = u32::from_le_bytes(self.mmap.get(off..off + 4)?.try_into().ok()?) as usize;
+        let s_end = u32::from_le_bytes(self.mmap.get(off + 4..off + 8)?.try_into().ok()?) as usize;
         let data_base = self.terms_strings_offset + (self.num_terms as usize + 1) * 4;
         let start = data_base + s_start;
         let end = data_base + s_end;
-        if end > self.mmap.len() {
+        if start >= end {
             return None;
         }
-        std::str::from_utf8(&self.mmap[start..end]).ok()
+        let slice = self.mmap.get(start..end)?;
+        std::str::from_utf8(slice).ok()
     }
 }
 
@@ -199,9 +208,36 @@ pub struct TermDictionary {
 impl TermDictionary {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         let file = File::open(path)?;
+        // SAFETY: The FST dictionary file is mapped read-only for fast prefix and fuzzy lookups.
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
         let fst_map = Map::new(mmap)?;
         Ok(Self { fst_map })
+    }
+
+    pub fn build_from_index<P: AsRef<Path>>(
+        fst_path: P,
+        index: &MmapIndex,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let file = File::create(fst_path.as_ref())?;
+        let writer = BufWriter::new(file);
+        let mut builder = MapBuilder::new(writer)?;
+        for idx in 0..index.num_terms as usize {
+            if let Some(term) = index.get_term_str(idx) {
+                builder.insert(term.as_bytes(), idx as u64)?;
+            }
+        }
+        builder.finish()?;
+        Self::open(fst_path)
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.fst_map.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.fst_map.is_empty()
     }
 
     pub fn get(&self, term: &str) -> Option<u64> {
@@ -246,5 +282,45 @@ impl TermDictionary {
             }
         }
         matched
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn test_truncated_mmap_index_access_does_not_panic() {
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join(format!("test_trunc_core_{}.bin", std::process::id()));
+        {
+            let mut file = File::create(&file_path).unwrap();
+            let mut header = vec![0u8; 128];
+            header[0..8].copy_from_slice(b"MSEIDX01");
+            header[8..12].copy_from_slice(&5u32.to_le_bytes());
+            header[20..28].copy_from_slice(&128u64.to_le_bytes());
+            header[28..36].copy_from_slice(&150u64.to_le_bytes());
+            header[44..52].copy_from_slice(&200u64.to_le_bytes());
+            header[52..56].copy_from_slice(&2u32.to_le_bytes());
+            header[64..72].copy_from_slice(&300u64.to_le_bytes());
+            file.write_all(&header).unwrap();
+        }
+
+        let index = MmapIndex::open(&file_path).unwrap();
+        assert_eq!(index.get_doc_length(0), 0);
+        assert_eq!(index.get_doc_length(4), 0);
+        assert!(index.get_doc_meta(0).is_none());
+        assert!(index.get_term_entry(0).is_none());
+        assert!(index.get_term_str(0).is_none());
+
+        let entry = TermEntry {
+            postings_offset: 0,
+            postings_len: 50,
+            doc_freq: 1,
+        };
+        assert_eq!(index.get_postings_slice(&entry), &[] as &[u8]);
+
+        let _ = std::fs::remove_file(file_path);
     }
 }

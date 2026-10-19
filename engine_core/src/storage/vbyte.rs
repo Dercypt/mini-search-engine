@@ -131,19 +131,19 @@ mod tests {
             0u32,
             1,
             63,
-            127, // 1 byte boundary (0x7F)
-            128, // 2 byte boundary (0x80)
+            127,
+            128,
             129,
             255,
             256,
-            16383, // 2 byte max ((1 << 14) - 1)
-            16384, // 3 byte boundary (1 << 14)
+            16383,
+            16384,
             65535,
             65536,
-            2097151,   // 3 byte max ((1 << 21) - 1)
-            2097152,   // 4 byte boundary (1 << 21)
-            268435455, // 4 byte max ((1 << 28) - 1)
-            268435456, // 5 byte boundary (1 << 28)
+            2097151,
+            2097152,
+            268435455,
+            268435456,
             u32::MAX - 1,
             u32::MAX,
         ];
@@ -152,7 +152,6 @@ mod tests {
             let mut buf = Vec::new();
             encode_vbyte(val, &mut buf);
 
-            // Verify encoded length expectations
             let expected_bytes = match val {
                 0..=0x7F => 1,
                 0x80..=0x3FFF => 2,
@@ -212,18 +211,14 @@ mod tests {
     #[test]
     fn test_vbyte_decode_truncated_and_invalid() {
         let mut offset = 0;
-        // Empty slice
         assert_eq!(decode_vbyte(&[], &mut offset), None);
 
-        // Continuation bit set on single byte without terminating byte
         offset = 0;
         assert_eq!(decode_vbyte(&[0x80], &mut offset), None);
 
-        // Incomplete sequence
         offset = 0;
         assert_eq!(decode_vbyte(&[0x81, 0x82], &mut offset), None);
 
-        // Overflow: more than 5 bytes with continuation bit set (shift > 35)
         offset = 0;
         let malformed = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80];
         assert_eq!(decode_vbyte(&malformed, &mut offset), None);
@@ -333,12 +328,10 @@ mod tests {
 
     #[test]
     fn test_delta_decoding_empty_and_single_posting() {
-        // Empty postings
         let empty_iter = PostingsIterator::new(&[], 0);
         let empty_results: Vec<Posting> = empty_iter.collect();
         assert!(empty_results.is_empty());
 
-        // Single posting
         let single = vec![Posting {
             doc_id: 777,
             term_frequency: 2,
@@ -355,18 +348,18 @@ mod tests {
     #[test]
     fn test_delta_decoding_direct_accumulator() {
         let mut buf = Vec::new();
-        encode_vbyte(10, &mut buf); // doc_id delta: 10
-        encode_vbyte(2, &mut buf); // tf: 2
-        encode_vbyte(5, &mut buf); // pos_delta: 5 -> pos: 5
-        encode_vbyte(3, &mut buf); // pos_delta: 3 -> pos: 8
-        encode_vbyte(5, &mut buf); // doc_id delta: 5 -> doc_id: 15
-        encode_vbyte(1, &mut buf); // tf: 1
-        encode_vbyte(12, &mut buf); // pos_delta: 12 -> pos: 12
-        encode_vbyte(20, &mut buf); // doc_id delta: 20 -> doc_id: 35
-        encode_vbyte(3, &mut buf); // tf: 3
-        encode_vbyte(1, &mut buf); // pos_delta: 1 -> pos: 1
-        encode_vbyte(4, &mut buf); // pos_delta: 4 -> pos: 5
-        encode_vbyte(10, &mut buf); // pos_delta: 10 -> pos: 15
+        encode_vbyte(10, &mut buf);
+        encode_vbyte(2, &mut buf);
+        encode_vbyte(5, &mut buf);
+        encode_vbyte(3, &mut buf);
+        encode_vbyte(5, &mut buf);
+        encode_vbyte(1, &mut buf);
+        encode_vbyte(12, &mut buf);
+        encode_vbyte(20, &mut buf);
+        encode_vbyte(3, &mut buf);
+        encode_vbyte(1, &mut buf);
+        encode_vbyte(4, &mut buf);
+        encode_vbyte(10, &mut buf);
 
         let iter = PostingsIterator::new(&buf, 3);
         let decoded: Vec<Posting> = iter.collect();
