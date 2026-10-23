@@ -325,6 +325,33 @@ mod tests {
     }
 
     #[test]
+    fn test_pagerank_score_upper_bound_edge_cases() {
+        // Clamping of alpha < 0.0 treats alpha as 0.0
+        let b_neg = pagerank_score_upper_bound(-0.5, DEFAULT_BETA);
+        let b_zero = pagerank_score_upper_bound(0.0, DEFAULT_BETA);
+        assert!((b_neg - b_zero).abs() < 1e-9);
+        assert!((b_zero - (1.0 + DEFAULT_BETA).ln()).abs() < 1e-9);
+
+        // Alpha = 1.0 or > 1.0 -> 0.0
+        assert_eq!(pagerank_score_upper_bound(1.0, DEFAULT_BETA), 0.0);
+        assert_eq!(pagerank_score_upper_bound(2.0, DEFAULT_BETA), 0.0);
+
+        // Beta = 0.0 -> ln(1) = 0.0
+        assert_eq!(pagerank_score_upper_bound(0.5, 0.0), 0.0);
+
+        // Negative beta is clamped to 0.0, avoiding NaN from ln(<1) or ln(<=0)
+        assert_eq!(pagerank_score_upper_bound(0.5, -10.0), 0.0);
+
+        // Always finite and non-negative
+        for alpha in [-1.0, 0.0, 0.5, 0.85, 1.0, 2.0] {
+            for beta in [-100.0, 0.0, 1.0, 1000.0] {
+                let bound = pagerank_score_upper_bound(alpha, beta);
+                assert!(bound.is_finite() && bound >= 0.0);
+            }
+        }
+    }
+
+    #[test]
     fn test_parse_query_variations() {
         let pipeline = TokenizerPipeline::new();
 

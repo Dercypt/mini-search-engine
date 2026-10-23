@@ -602,4 +602,142 @@ mod tests {
         let _ = std::fs::remove_file(test_index_path);
         let _ = std::fs::remove_file(test_fst_path);
     }
+
+    #[test]
+    fn test_wand_pruning_with_pagerank_threshold() {
+        let test_index_path =
+            std::env::temp_dir().join(format!("test_wand_pr_index_{}.bin", std::process::id()));
+        let test_fst_path =
+            std::env::temp_dir().join(format!("test_wand_pr_fst_{}.fst", std::process::id()));
+
+        let total_docs = 5;
+        let avg_doc_length = 10.0;
+        let doc_lengths = vec![10, 10, 10, 10, 10];
+        let pagerank = vec![0.5, 0.01, 0.01, 0.01, 0.01];
+        let doc_metadata: Vec<crate::storage::writer::DocMetadata> = (0..5)
+            .map(|i| crate::storage::writer::DocMetadata {
+                internal_id: i,
+                hex_id: format!("doc{}", i),
+                url: format!("https://example.com/{}", i),
+                title: format!("Doc {}", i),
+                length: 10,
+                pagerank: pagerank[i as usize],
+            })
+            .collect();
+
+        let mut inverted_index = HashMap::new();
+        inverted_index.insert(
+            "fast".to_string(),
+            vec![
+                Posting {
+                    doc_id: 0,
+                    term_frequency: 10,
+                    positions: vec![0],
+                },
+                Posting {
+                    doc_id: 1,
+                    term_frequency: 1,
+                    positions: vec![0],
+                },
+                Posting {
+                    doc_id: 2,
+                    term_frequency: 1,
+                    positions: vec![0],
+                },
+                Posting {
+                    doc_id: 3,
+                    term_frequency: 1,
+                    positions: vec![0],
+                },
+                Posting {
+                    doc_id: 4,
+                    term_frequency: 1,
+                    positions: vec![0],
+                },
+            ],
+        );
+        inverted_index.insert(
+            "rust".to_string(),
+            vec![
+                Posting {
+                    doc_id: 0,
+                    term_frequency: 10,
+                    positions: vec![1],
+                },
+                Posting {
+                    doc_id: 1,
+                    term_frequency: 1,
+                    positions: vec![1],
+                },
+            ],
+        );
+
+        let mut sorted_terms = vec!["fast".to_string(), "rust".to_string()];
+        sorted_terms.sort();
+
+        BinaryIndexWriter::write_index(
+            &test_index_path,
+            total_docs,
+            avg_doc_length,
+            &doc_lengths,
+            &pagerank,
+            &doc_metadata,
+            &sorted_terms,
+            &inverted_index,
+        )
+        .expect("write_index failed");
+
+        let fst_file = File::create(&test_fst_path).expect("create fst failed");
+        let fst_writer = BufWriter::new(fst_file);
+        let mut builder = MapBuilder::new(fst_writer).expect("mapbuilder failed");
+        for (term_idx, term) in sorted_terms.iter().enumerate() {
+            builder
+                .insert(term.as_bytes(), term_idx as u64)
+                .expect("insert term");
+        }
+        builder.finish().expect("finish fst");
+
+        let mmap_index = MmapIndex::open(&test_index_path).expect("open index failed");
+        let dictionary = TermDictionary::open(&test_fst_path).expect("open dict failed");
+        let pipeline = TokenizerPipeline::new();
+
+        let res_top1 = search_combined_mmap(
+            "rust fast",
+            &mmap_index,
+            &dictionary,
+            &pipeline,
+            0.85,
+            DEFAULT_BETA,
+            1,
+        );
+        let res_all = search_combined_mmap(
+            "rust fast",
+            &mmap_index,
+            &dictionary,
+            &pipeline,
+            0.85,
+            DEFAULT_BETA,
+            5,
+        );
+
+        assert_eq!(res_top1.len(), 1);
+        assert_eq!(res_top1[0].0.hex_id, "doc0");
+        assert_eq!(res_all[0].0.hex_id, "doc0");
+        assert!((res_top1[0].1 - res_all[0].1).abs() < 1e-9);
+
+        let res_pr = search_combined_mmap(
+            "rust fast",
+            &mmap_index,
+            &dictionary,
+            &pipeline,
+            0.0,
+            DEFAULT_BETA,
+            1,
+        );
+        assert_eq!(res_pr.len(), 1);
+        assert_eq!(res_pr[0].0.hex_id, "doc0");
+
+        let _ = std::fs::remove_file(test_index_path);
+        let _ = std::fs::remove_file(test_fst_path);
+    }
 }
