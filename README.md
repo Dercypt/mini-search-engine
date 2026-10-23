@@ -56,4 +56,4 @@ Run code formatting, linter, and test suites:
 
 ## License
 
-MIT
+[MIT](LICENSE)
