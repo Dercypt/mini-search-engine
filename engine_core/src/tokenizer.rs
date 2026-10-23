@@ -214,6 +214,25 @@ impl TokenizerPipeline {
             .collect()
     }
 
+    pub fn tokenize_surface(&self, text: &str) -> Vec<(usize, String)> {
+        let cleaned = self.regex.replace_all(text, " ").to_lowercase();
+        cleaned
+            .split_whitespace()
+            .enumerate()
+            .filter(|(_idx, token)| token.len() > 1 && !self.stop_words.contains(token))
+            .map(|(idx, token)| (idx, token.to_string()))
+            .collect()
+    }
+
+    pub fn extract_surface_words(&self, text: &str) -> Vec<String> {
+        let cleaned = self.regex.replace_all(text, " ").to_lowercase();
+        cleaned
+            .split_whitespace()
+            .filter(|token| token.len() > 1 && !self.stop_words.contains(token))
+            .map(|token| token.to_string())
+            .collect()
+    }
+
     pub fn word_count(&self, text: &str) -> usize {
         self.regex.replace_all(text, " ").split_whitespace().count()
     }
@@ -233,6 +252,35 @@ mod tests {
                 (0, "search".to_string()),
                 (2, "web".to_string()),
                 (5, "engin".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_tokenize_surface_preserves_unstemmed_words() {
+        let pipeline = TokenizerPipeline::new();
+        let tokens = pipeline.tokenize_surface("search the web with an engine");
+        assert_eq!(
+            tokens,
+            vec![
+                (0, "search".to_string()),
+                (2, "web".to_string()),
+                (5, "engine".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_extract_surface_words_unstemmed() {
+        let pipeline = TokenizerPipeline::new();
+        let words = pipeline.extract_surface_words("Algorithms for Search Engines and Programming");
+        assert_eq!(
+            words,
+            vec![
+                "algorithms".to_string(),
+                "search".to_string(),
+                "engines".to_string(),
+                "programming".to_string(),
             ]
         );
     }
