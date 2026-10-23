@@ -1,64 +1,16 @@
 # Mini Search Engine
 
-A fast, lightweight, from-scratch search engine built in Rust. Features an asynchronous web crawler, a zero-deserialization memory-mapped binary inverted index, and sub-millisecond full-text retrieval ranked with Okapi BM25, PageRank, and WAND dynamic pruning.
+A lightweight full-text search engine built from scratch in Rust. It crawls web pages, builds a zero-copy memory-mapped binary inverted index, and serves ranked search results using BM25, PageRank, and WAND dynamic pruning.
 
 [Live Demo](https://mini-search-engine-ijmt.onrender.com/)
 
 ---
 
-## Key Highlights
+## How It Works
 
-- **Zero-Deserialization Engine (`memmap2`)**: Postings and documents are queried directly from disk-backed memory maps without RAM deserialization overhead.
-- **VByte-Compressed Postings**: Postings lists are delta-encoded and compressed using Variable Byte (VByte) encoding for compact disk footprint and fast scanning.
-- **FST Lexicon**: Finite-state transducer dictionary (`fst::Map`) enabling sub-millisecond term lookups, prefix auto-suggestions, and typo-tolerant search.
-- **Hybrid Scoring**: Combines Okapi BM25 ($k_1 = 1.5, b = 0.75$) relevance with link-graph PageRank scores.
-- **WAND Dynamic Pruning**: Weak AND (WAND) top-$k$ candidate pruning algorithm avoids scoring non-competitive documents.
-- **Exact Phrase Matching**: Positional postings enable exact quoted phrase filtering (e.g. `"search engine"`).
-- **Asynchronous Crawler**: Concurrent Wikipedia crawler built with `tokio`, `reqwest`, robots.txt compliance, and bloom-filter deduplication.
-- **Embedded Web UI & REST API**: Single-binary web service with responsive search interface and JSON API served via `axum`.
-
----
-
-## Architecture & Data Flow
-
-The project is split into three modular crates forming an offline-to-online retrieval pipeline:
-
-```
-[ Web / Wikipedia ]
-        │
-        ▼ (Asynchronous Web Crawler)
-   ┌─────────┐
-   │ crawler │  ──> documents.bin (MSEDOC01 binary document store)
-   └─────────┘
-        │
-        ▼ (Batch Indexer & Lexicon Builder)
-   ┌─────────┐  ──> index.bin (MSEIDX01 VByte inverted index + metadata)
-   │ indexer │  ──> dictionary.fst (FST term dictionary)
-   │         │  ──> surface.fst (FST surface vocabulary for UI completions)
-   └─────────┘
-        │
-        ▼ (Memory-Mapped Retrieval Engine)
- ┌──────────────┐
- │  search_api  │  <── Serves Web UI & REST API on port 8080 (0 RAM choke)
- └──────────────┘
-```
-
-### Components
-
-| Crate | Responsibility | Key Output / Role |
-|-------|----------------|-------------------|
-| [`crawler`](crawler/) | Asynchronously scrapes web pages with robots.txt parsing, HTML extraction, bloom-filter deduplication, and link graph collection. | `documents.bin` |
-| [`indexer`](indexer/) | Tokenizes raw documents, computes global PageRank via power iteration, delta-encodes positional postings, and serializes binary index files. | `index.bin`, `dictionary.fst`, `surface.fst` |
-| [`search_api`](search_api/) | Mmaps index files read-only, evaluates BM25/WAND queries, runs prefix auto-suggest, generates dynamic snippets, and hosts the web UI. | HTTP server (`:8080`) |
-
-### Binary Storage Formats
-
-- **`documents.bin` (`MSEDOC01`)**: 64-byte magic header, sequential document records (URL, title, body, links), and a trailing document offset table for $O(1)$ random lookups.
-- **`index.bin` (`MSEIDX01`)**: 128-byte magic header containing doc count, average document length, and 64-bit byte offsets pointing to doc lengths, PageRank scores, term metadata tables, and delta-compressed VByte posting blocks.
-- **`dictionary.fst`**: Monotonically sorted finite-state transducer mapping term strings directly to metadata byte offsets in `index.bin`.
-- **`surface.fst`**: Monotonically sorted finite-state transducer storing unstemmed surface words and frequencies for UI auto-complete prefix suggestions and fuzzy "Did You Mean" corrections.
-
-> **Architecture Note**: This engine uses an offline batch indexing model designed for maximum sequential compression and zero-copy mmap reads. Real-time incremental search engines typically expand on this using LSM segment flushes and background compaction merges (e.g., Lucene or Tantivy).
+1. Crawler (`crawler`): Asynchronously fetches web pages and stores raw content in a compact binary document format.
+2. Indexer (`indexer`): Tokenizes content, computes PageRank, and serializes a compressed binary inverted index and prefix dictionary.
+3. Search API & Web UI (`search_api`): Uses memory-mapped files to serve ranked search queries and prefix suggestions with low latency and minimal memory overhead.
 
 ---
 
