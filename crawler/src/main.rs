@@ -143,6 +143,18 @@ pub async fn fetch_and_parse_robots(
     }
 }
 
+/// Fetches a page from the specified URL, verifying that the HTTP response is successful (2xx).
+/// Returns `None` if the network request fails or if the response status indicates an error (e.g. 404, 429, 500).
+pub(crate) async fn fetch_page_response(
+    client: &reqwest::Client,
+    url: &str,
+) -> Option<reqwest::Response> {
+    match client.get(url).send().await {
+        Ok(res) if res.status().is_success() => Some(res),
+        _ => None,
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
@@ -289,9 +301,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     sleep(Duration::from_millis(80)).await;
 
-                    let response = match client.get(&current_url).send().await {
-                        Ok(res) => res,
-                        Err(_) => {
+                    let response = match fetch_page_response(&client, &current_url).await {
+                        Some(res) => res,
+                        None => {
                             in_flight.fetch_sub(1, Ordering::SeqCst);
                             return;
                         }
