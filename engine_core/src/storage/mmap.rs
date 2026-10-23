@@ -230,6 +230,23 @@ impl TermDictionary {
         Self::open(fst_path)
     }
 
+    pub fn build_from_surface_words<P: AsRef<Path>, I: IntoIterator<Item = (String, u64)>>(
+        fst_path: P,
+        words: I,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let file = File::create(fst_path.as_ref())?;
+        let writer = BufWriter::new(file);
+        let mut builder = MapBuilder::new(writer)?;
+        let mut sorted: Vec<(String, u64)> = words.into_iter().collect();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        sorted.dedup_by(|a, b| a.0 == b.0);
+        for (term, freq) in sorted {
+            builder.insert(term.as_bytes(), freq)?;
+        }
+        builder.finish()?;
+        Self::open(fst_path)
+    }
+
     #[inline]
     pub fn len(&self) -> usize {
         self.fst_map.len()
@@ -320,6 +337,52 @@ mod tests {
             doc_freq: 1,
         };
         assert_eq!(index.get_postings_slice(&entry), &[] as &[u8]);
+
+        let _ = std::fs::remove_file(file_path);
+    }
+
+    #[test]
+    fn test_surface_dictionary_prefix_and_fuzzy_completions() {
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join(format!("test_surface_fst_{}.bin", std::process::id()));
+
+        let surface_words = vec![
+            ("algorithm".to_string(), 100),
+            ("algorithmic".to_string(), 30),
+            ("algorithms".to_string(), 50),
+            ("engine".to_string(), 80),
+            ("engineering".to_string(), 25),
+            ("engines".to_string(), 40),
+            ("distributed".to_string(), 60),
+            ("distribution".to_string(), 35),
+            ("program".to_string(), 90),
+            ("programming".to_string(), 70),
+        ];
+
+        let dict = TermDictionary::build_from_surface_words(&file_path, surface_words)
+            .expect("build surface dictionary failed");
+
+        assert_eq!(dict.len(), 10);
+
+        // Verify prefix suggest returns full English surface forms in README.md order
+        let suggestions = dict.suggest_prefix("algo", 3);
+        assert_eq!(
+            suggestions,
+            vec![
+                "algorithm".to_string(),
+                "algorithmic".to_string(),
+                "algorithms".to_string(),
+            ]
+        );
+
+        // Verify fuzzy completions return English words, not Porter-stemmed truncated roots
+        let fuzzy_engine = dict.fuzzy_terms("engne", 2, 3);
+        assert!(fuzzy_engine.contains(&"engine".to_string()));
+        assert!(!fuzzy_engine.contains(&"engin".to_string()));
+
+        let fuzzy_dist = dict.fuzzy_terms("distribusion", 2, 3);
+        assert!(fuzzy_dist.contains(&"distribution".to_string()));
+        assert!(!fuzzy_dist.contains(&"distribut".to_string()));
 
         let _ = std::fs::remove_file(file_path);
     }
