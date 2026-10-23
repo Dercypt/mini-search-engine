@@ -6,8 +6,9 @@ This document defines the toolchain, verification steps, and autonomous repair p
 
 ## Toolchain Specification
 
-The repository consists of three Rust crates targeting Rust 1.85+ (Edition 2024):
+The repository consists of four Rust crates targeting Rust 1.85+ (Edition 2024):
 - **Crates**:
+  - `engine_core` ([`engine_core/Cargo.toml`](file:///Users/zyndrex/mini-search-engine-sandbox/engine_core/Cargo.toml))
   - `crawler` ([`crawler/Cargo.toml`](file:///Users/zyndrex/mini-search-engine-sandbox/crawler/Cargo.toml))
   - `indexer` ([`indexer/Cargo.toml`](file:///Users/zyndrex/mini-search-engine-sandbox/indexer/Cargo.toml))
   - `search_api` ([`search_api/Cargo.toml`](file:///Users/zyndrex/mini-search-engine-sandbox/search_api/Cargo.toml))
@@ -32,6 +33,7 @@ flowchart LR
 ### Stage 1: Code Formatting
 Checks source code formatting against repository style rules without altering files:
 ```bash
+cargo fmt --manifest-path engine_core/Cargo.toml --check
 cargo fmt --manifest-path crawler/Cargo.toml --check
 cargo fmt --manifest-path indexer/Cargo.toml --check
 cargo fmt --manifest-path search_api/Cargo.toml --check
@@ -40,6 +42,7 @@ cargo fmt --manifest-path search_api/Cargo.toml --check
 ### Stage 2: Static Analysis & Lints
 Ensures zero compiler warnings, dead code, or unidiomatic patterns:
 ```bash
+cargo clippy --manifest-path engine_core/Cargo.toml -- -D warnings
 cargo clippy --manifest-path crawler/Cargo.toml -- -D warnings
 cargo clippy --manifest-path indexer/Cargo.toml -- -D warnings
 cargo clippy --manifest-path search_api/Cargo.toml -- -D warnings
@@ -48,6 +51,7 @@ cargo clippy --manifest-path search_api/Cargo.toml -- -D warnings
 ### Stage 3: Automated Unit & Integration Tests
 Executes all unit tests and integration test suites:
 ```bash
+cargo test --manifest-path engine_core/Cargo.toml
 cargo test --manifest-path crawler/Cargo.toml
 cargo test --manifest-path indexer/Cargo.toml
 cargo test --manifest-path search_api/Cargo.toml
