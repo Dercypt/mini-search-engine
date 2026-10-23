@@ -44,32 +44,16 @@ docker compose up --build
 
 ---
 
-## Verification & Testing
+## Verification
 
-Verify code style, lints, and test suites across all crates in one step:
+Run code formatting, linter, and test suites:
 
 ```bash
 ./verify.sh
 ```
 
-The verification pipeline executes:
-1. **Formatting**: `cargo fmt --check` across `crawler`, `indexer`, and `search_api`.
-2. **Static Analysis**: `cargo clippy -- -D warnings` with zero allowed warnings.
-3. **Unit & Integration Tests**: `cargo test` across all crates.
-4. **Law Verification**: Invariant tests validating system laws defined in [`LAWS.md`](LAWS.md).
-
----
-
-## Governance & System Invariants
-
-This repository enforces strict architectural guarantees:
-- **[`LAWS.md`](LAWS.md)**: Non-negotiable system invariants (binary headers `MSEDOC01`/`MSEIDX01`, monotonic delta-encoding, bounded finite BM25 scores, API JSON contracts).
-- **[`PRINCIPLES.md`](PRINCIPLES.md)**: Engineering defaults (strongly-typed errors, zero untyped bypasses, strict safety, escalation triggers).
-- **[`HARNESS.md`](HARNESS.md)**: Quality gates and verification lifecycle rules.
-- **[`AGENTS.md`](AGENTS.md)**: Operating instructions and autonomous verification protocols for AI coding assistants.
-
 ---
 
 ## License
 
-[MIT](LICENSE)
+MIT
