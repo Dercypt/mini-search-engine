@@ -683,4 +683,93 @@ Disallow: /
         assert_eq!(loop_iterations, 1);
         assert!(start.elapsed() < Duration::from_secs(2));
     }
+
+    #[tokio::test]
+    async fn test_fetch_page_response_http_status_filtering() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        async fn spawn_mock_server(
+            status_code: u16,
+            status_text: &str,
+            body: &str,
+        ) -> (String, tokio::task::JoinHandle<()>) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let body_owned = body.to_string();
+            let status_text_owned = status_text.to_string();
+            let handle = tokio::spawn(async move {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let mut buf = [0u8; 1024];
+                    let _ = socket.read(&mut buf).await;
+                    let response = format!(
+                        "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n{}",
+                        status_code,
+                        status_text_owned,
+                        body_owned.len(),
+                        body_owned
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                }
+            });
+            (format!("http://{}", addr), handle)
+        }
+
+        let client = reqwest::Client::new();
+
+        // 1. HTTP 200 OK should be accepted
+        let (url_200, handle_200) =
+            spawn_mock_server(200, "OK", "<html><body>Success</body></html>").await;
+        let res_200 = fetch_page_response(&client, &url_200).await;
+        assert!(res_200.is_some());
+        let res_200 = res_200.unwrap();
+        assert_eq!(res_200.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            res_200.text().await.unwrap(),
+            "<html><body>Success</body></html>"
+        );
+        handle_200.await.unwrap();
+
+        // 2. HTTP 404 Not Found should be rejected (returns None)
+        let (url_404, handle_404) = spawn_mock_server(
+            404,
+            "Not Found",
+            "<html><body>404 Not Found error page</body></html>",
+        )
+        .await;
+        let res_404 = fetch_page_response(&client, &url_404).await;
+        assert!(
+            res_404.is_none(),
+            "404 Not Found responses must not be accepted for crawling"
+        );
+        handle_404.await.unwrap();
+
+        // 3. HTTP 429 Too Many Requests should be rejected (returns None)
+        let (url_429, handle_429) = spawn_mock_server(
+            429,
+            "Too Many Requests",
+            "<html><body>Rate limit exceeded</body></html>",
+        )
+        .await;
+        let res_429 = fetch_page_response(&client, &url_429).await;
+        assert!(
+            res_429.is_none(),
+            "429 Too Many Requests responses must not be accepted for crawling"
+        );
+        handle_429.await.unwrap();
+
+        // 4. HTTP 500 Internal Server Error should be rejected (returns None)
+        let (url_500, handle_500) = spawn_mock_server(
+            500,
+            "Internal Server Error",
+            "<html><body>Server error</body></html>",
+        )
+        .await;
+        let res_500 = fetch_page_response(&client, &url_500).await;
+        assert!(
+            res_500.is_none(),
+            "500 Internal Server Error responses must not be accepted for crawling"
+        );
+        handle_500.await.unwrap();
+    }
 }
