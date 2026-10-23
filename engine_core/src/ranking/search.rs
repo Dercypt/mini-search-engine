@@ -1,8 +1,8 @@
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use crate::ranking::bm25::{
-    DEFAULT_BETA, ParsedQuery, bm25_idf, bm25_tf_weight, final_score, parse_query,
-    phrase_matches_with_offsets,
+    DEFAULT_BETA, ParsedQuery, bm25_idf, bm25_tf_weight, final_score, pagerank_score_upper_bound,
+    parse_query, phrase_matches_with_offsets,
 };
 use crate::ranking::wand::{ScoredDoc, WandPostingCursor};
 use crate::storage::mmap::{DocMetaRef, MmapIndex, TermDictionary};
@@ -112,11 +112,7 @@ pub fn execute_wand_search(
     let n = index.total_docs as f64;
     let alpha = alpha.clamp(0.0, 1.0);
 
-    let pr_max = if alpha < 1.0 {
-        (1.0 - alpha) * (1.0 + beta)
-    } else {
-        0.0
-    };
+    let pr_max = pagerank_score_upper_bound(alpha, beta);
 
     // Initialize WAND cursors for all query terms
     let mut cursors: Vec<WandPostingCursor> = Vec::with_capacity(all_terms.len());
