@@ -104,6 +104,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output_json_index_path =
         resolve_path("INDEX_JSON_PATH", &["index.json", "indexer/index.json"]);
     let output_fst_path = resolve_path("FST_PATH", &["dictionary.fst", "indexer/dictionary.fst"]);
+    let output_surface_fst_path =
+        resolve_path("SURFACE_FST_PATH", &["surface.fst", "indexer/surface.fst"]);
 
     // Auto-convert JSON docs to binary storage if needed
     if !Path::new(&docs_bin_path).exists() && Path::new(&docs_json_path).exists() {
@@ -126,6 +128,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Indexing documents...");
     let index_start = Instant::now();
     let mut inverted_index: HashMap<String, Vec<Posting>> = HashMap::new();
+    let mut surface_word_freq: HashMap<String, u64> = HashMap::new();
     let mut doc_metadata: Vec<DocMetadata> = Vec::with_capacity(total_docs as usize);
     let mut doc_lengths: Vec<u32> = Vec::with_capacity(total_docs as usize);
     let mut total_terms: usize = 0;
@@ -143,6 +146,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let title_terms = pipeline.tokenize(doc.title);
         let title_word_count = pipeline.word_count(doc.title);
         let content_terms = pipeline.tokenize(doc.content);
+
+        for word in pipeline.extract_surface_words(doc.title) {
+            *surface_word_freq.entry(word).or_insert(0) += 1;
+        }
+        for word in pipeline.extract_surface_words(doc.content) {
+            *surface_word_freq.entry(word).or_insert(0) += 1;
+        }
 
         let mut all_terms: Vec<(u32, String)> =
             Vec::with_capacity(title_terms.len() + content_terms.len());
@@ -258,6 +268,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fst_start.elapsed()
     );
 
+    // Build and save Surface Vocabulary FST (Map mapping surface term -> frequency)
+    let surface_fst_start = Instant::now();
+    let surface_dict =
+        TermDictionary::build_from_surface_words(&output_surface_fst_path, surface_word_freq)?;
+    println!(
+        "Compiled and saved {} surface terms to {} in {:?}",
+        surface_dict.len(),
+        output_surface_fst_path,
+        surface_fst_start.elapsed()
+    );
+
     // Save legacy index.json for backward compatibility
     let json_save_start = Instant::now();
     let mut doc_meta_map: HashMap<u32, DocMetadata> = HashMap::with_capacity(doc_metadata.len());
@@ -309,4 +330,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_indexer_surface_vocabulary_collection() {
+        let pipeline = TokenizerPipeline::new();
+        let title = "Search Algorithms";
+        let content = "Algorithmic thinking and efficient algorithms for engines.";
+
+        let mut freq_map: HashMap<String, u64> = HashMap::new();
+        for word in pipeline.extract_surface_words(title) {
+            *freq_map.entry(word).or_insert(0) += 1;
+        }
+        for word in pipeline.extract_surface_words(content) {
+            *freq_map.entry(word).or_insert(0) += 1;
+        }
+
+        assert!(freq_map.contains_key("algorithms"));
+        assert!(freq_map.contains_key("algorithmic"));
+        assert_eq!(*freq_map.get("algorithms").unwrap(), 2);
+        assert_eq!(*freq_map.get("algorithmic").unwrap(), 1);
+        assert_eq!(*freq_map.get("engines").unwrap(), 1);
+        // Ensure no stemmed forms leaked into surface map
+        assert!(!freq_map.contains_key("engin"));
+
+        let temp_dir = std::env::temp_dir();
+        let fst_path = temp_dir.join(format!("test_indexer_surface_{}.fst", std::process::id()));
+        let dict = TermDictionary::build_from_surface_words(&fst_path, freq_map).unwrap();
+        let suggestions = dict.suggest_prefix("algo", 5);
+        assert_eq!(
+            suggestions,
+            vec!["algorithmic".to_string(), "algorithms".to_string()]
+        );
+        let _ = std::fs::remove_file(fst_path);
+    }
 }
