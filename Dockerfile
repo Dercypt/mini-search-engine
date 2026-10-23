@@ -15,9 +15,9 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y ca-certificates bash && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/crawler/target/release/crawler /app/crawler
-COPY --from=builder /app/indexer/target/release/indexer /app/indexer
-COPY --from=builder /app/search_api/target/release/search_api /app/search_api
+COPY --from=builder /app/target/release/crawler /app/crawler
+COPY --from=builder /app/target/release/indexer /app/indexer
+COPY --from=builder /app/target/release/search_api /app/search_api
 COPY --from=builder /app/indexer/dictionary.fst /app/dictionary.fst
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh
