@@ -34,6 +34,7 @@ The project is split into three modular crates forming an offline-to-online retr
         ▼ (Batch Indexer & Lexicon Builder)
    ┌─────────┐  ──> index.bin (MSEIDX01 VByte inverted index + metadata)
    │ indexer │  ──> dictionary.fst (FST term dictionary)
+   │         │  ──> surface.fst (FST surface vocabulary for UI completions)
    └─────────┘
         │
         ▼ (Memory-Mapped Retrieval Engine)
@@ -47,7 +48,7 @@ The project is split into three modular crates forming an offline-to-online retr
 | Crate | Responsibility | Key Output / Role |
 |-------|----------------|-------------------|
 | [`crawler`](crawler/) | Asynchronously scrapes web pages with robots.txt parsing, HTML extraction, bloom-filter deduplication, and link graph collection. | `documents.bin` |
-| [`indexer`](indexer/) | Tokenizes raw documents, computes global PageRank via power iteration, delta-encodes positional postings, and serializes binary index files. | `index.bin`, `dictionary.fst` |
+| [`indexer`](indexer/) | Tokenizes raw documents, computes global PageRank via power iteration, delta-encodes positional postings, and serializes binary index files. | `index.bin`, `dictionary.fst`, `surface.fst` |
 | [`search_api`](search_api/) | Mmaps index files read-only, evaluates BM25/WAND queries, runs prefix auto-suggest, generates dynamic snippets, and hosts the web UI. | HTTP server (`:8080`) |
 
 ### Binary Storage Formats
@@ -55,6 +56,7 @@ The project is split into three modular crates forming an offline-to-online retr
 - **`documents.bin` (`MSEDOC01`)**: 64-byte magic header, sequential document records (URL, title, body, links), and a trailing document offset table for $O(1)$ random lookups.
 - **`index.bin` (`MSEIDX01`)**: 128-byte magic header containing doc count, average document length, and 64-bit byte offsets pointing to doc lengths, PageRank scores, term metadata tables, and delta-compressed VByte posting blocks.
 - **`dictionary.fst`**: Monotonically sorted finite-state transducer mapping term strings directly to metadata byte offsets in `index.bin`.
+- **`surface.fst`**: Monotonically sorted finite-state transducer storing unstemmed surface words and frequencies for UI auto-complete prefix suggestions and fuzzy "Did You Mean" corrections.
 
 > **Architecture Note**: This engine uses an offline batch indexing model designed for maximum sequential compression and zero-copy mmap reads. Real-time incremental search engines typically expand on this using LSM segment flushes and background compaction merges (e.g., Lucene or Tantivy).
 
@@ -236,6 +238,7 @@ Configurable via environment variables:
 | `INDEX_PATH` | `../indexer/index.bin`, `index.bin`, `/app/index.bin` | Inverted index path |
 | `DOCS_PATH` | `../crawler/documents.bin`, `documents.bin`, `/app/documents.bin` | Document store path |
 | `FST_PATH` | `../indexer/dictionary.fst`, `dictionary.fst`, `/app/dictionary.fst` | FST dictionary path |
+| `SURFACE_FST_PATH` | `../indexer/surface.fst`, `surface.fst`, `/app/surface.fst` | Surface vocabulary FST path |
 
 ---
 
