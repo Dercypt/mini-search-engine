@@ -9,6 +9,7 @@ pub struct AppState {
     pub doc_store: Arc<MmapDocStore>,
     pub pipeline: TokenizerPipeline,
     pub dictionary: Arc<TermDictionary>,
+    pub surface_dictionary: Arc<TermDictionary>,
 }
 
 #[derive(Deserialize)]
@@ -25,7 +26,7 @@ pub struct SuggestParams {
     pub limit: Option<usize>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct SearchHit {
     pub rank: usize,
     pub doc_id: String,
@@ -37,7 +38,7 @@ pub struct SearchHit {
     pub snippet: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct SearchResponse {
     pub query: String,
     pub total_hits: usize,
