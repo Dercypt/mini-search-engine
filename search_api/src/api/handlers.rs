@@ -386,6 +386,110 @@ mod tests {
         assert!(!dym.contains(&"engin".to_string()));
     }
 
+    #[tokio::test]
+    async fn test_suggest_handler_edge_cases_empty_casing_and_limits() {
+        let temp_dir = std::env::temp_dir();
+        let state = create_test_state(&temp_dir, &format!("sugg_edge_{}", std::process::id()));
+
+        // 1. Empty and whitespace-only prefixes
+        let empty_res = suggest_handler(
+            State(state.clone()),
+            Query(SuggestParams {
+                q: Some("   ".to_string()),
+                limit: Some(5),
+            }),
+        )
+        .await
+        .into_response();
+        let body = axum::body::to_bytes(empty_res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let suggestions: Vec<String> = serde_json::from_slice(&body).unwrap();
+        assert!(suggestions.is_empty());
+
+        let none_res = suggest_handler(
+            State(state.clone()),
+            Query(SuggestParams {
+                q: None,
+                limit: Some(5),
+            }),
+        )
+        .await
+        .into_response();
+        let body = axum::body::to_bytes(none_res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let suggestions: Vec<String> = serde_json::from_slice(&body).unwrap();
+        assert!(suggestions.is_empty());
+
+        // 2. Case-insensitivity ("ALGO")
+        let case_res = suggest_handler(
+            State(state.clone()),
+            Query(SuggestParams {
+                q: Some("ALGO".to_string()),
+                limit: Some(3),
+            }),
+        )
+        .await
+        .into_response();
+        let body = axum::body::to_bytes(case_res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let suggestions: Vec<String> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            suggestions,
+            vec![
+                "algorithm".to_string(),
+                "algorithmic".to_string(),
+                "algorithms".to_string(),
+            ]
+        );
+
+        // 3. Clamping limit
+        let clamped_res = suggest_handler(
+            State(state.clone()),
+            Query(SuggestParams {
+                q: Some("algo".to_string()),
+                limit: Some(1),
+            }),
+        )
+        .await
+        .into_response();
+        let body = axum::body::to_bytes(clamped_res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let suggestions: Vec<String> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(suggestions, vec!["algorithm".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_search_handler_no_did_you_mean_on_positive_hits() {
+        let temp_dir = std::env::temp_dir();
+        let state = create_test_state(&temp_dir, &format!("hits_{}", std::process::id()));
+
+        // Query "algorithm" which is present in index (total_hits > 0)
+        let response = search_handler(
+            State(state.clone()),
+            Query(SearchParams {
+                q: Some("algorithm".to_string()),
+                page: Some(1),
+                limit: Some(10),
+                alpha: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let search_resp: SearchResponse = serde_json::from_slice(&body_bytes).unwrap();
+
+        assert!(search_resp.total_hits > 0);
+        assert!(search_resp.did_you_mean.is_none());
+    }
+
     #[test]
     fn test_paginate_ranked_results_bounds() {
         let ranked: Vec<(u32, f64)> = (0..10).map(|i| (i, 1.0 / (i as f64 + 1.0))).collect();
