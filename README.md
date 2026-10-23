@@ -14,18 +14,11 @@ A lightweight full-text search engine built from scratch in Rust. It crawls web 
 
 ---
 
-## Prerequisites
-
-- **Rust 1.85+** (Edition 2024 support)
-- **Docker & Docker Compose** (optional)
-
----
-
 ## Quickstart
 
-### Option 1: One-Command Pipeline (Recommended)
+### Native
 
-Run the end-to-end crawler, indexer, and search server with the provided script:
+Prerequisites: Rust 1.85+
 
 ```bash
 git clone https://github.com/Dercypt/mini-search-engine.git
@@ -35,35 +28,11 @@ cd mini-search-engine
 
 Open `http://localhost:8080` in your browser.
 
----
-
-### Option 2: Step-by-Step Manual Execution
-
-```bash
-# 1. Crawl pages (defaults to 1000 Wikipedia pages)
-cd crawler
-cargo run --release -- --max-pages 500 --seed "https://en.wikipedia.org/wiki/Search_engine"
-cd ..
-
-# 2. Build inverted index and FST dictionary
-cd indexer
-cargo run --release
-cd ..
-
-# 3. Start Search API & Web UI
-cd search_api
-cargo run --release
-```
-
----
-
-### Option 3: Docker
+### Docker
 
 ```bash
 docker compose up --build
 ```
-
-Access the UI at `http://localhost:8080`.
 
 ---
 
