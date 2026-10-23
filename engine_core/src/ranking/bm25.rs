@@ -30,6 +30,21 @@ pub fn final_score(bm25: f64, pagerank: f64, alpha: f64, beta: f64) -> f64 {
     bm25_part + pr_part
 }
 
+/// Computes the theoretical upper bound of the PageRank contribution to `final_score`.
+///
+/// Since PageRank values are normalized such that $PR \le 1.0$, the PageRank score
+/// component $(1 - \alpha) \ln(1 + \beta \cdot PR)$ is bounded by $(1 - \alpha) \ln(1 + \beta)$.
+/// When $\alpha \ge 1.0$, PageRank is disabled and the bound is $0.0$.
+#[inline]
+pub fn pagerank_score_upper_bound(alpha: f64, beta: f64) -> f64 {
+    let alpha_clamped = alpha.clamp(0.0, 1.0);
+    if alpha_clamped < 1.0 {
+        (1.0 - alpha_clamped) * (1.0 + beta.max(0.0)).ln()
+    } else {
+        0.0
+    }
+}
+
 #[inline]
 pub fn bm25_score(
     tf: f64,
@@ -286,6 +301,54 @@ mod tests {
         let s_low = final_score(3.0, 0.001, 0.7, DEFAULT_BETA);
         let s_high = final_score(3.0, 0.01, 0.7, DEFAULT_BETA);
         assert!(s_high > s_low);
+    }
+
+    #[test]
+    fn test_pagerank_score_upper_bound() {
+        let alpha = DEFAULT_ALPHA; // 0.85
+        let beta = DEFAULT_BETA; // 1000.0
+
+        let bound = pagerank_score_upper_bound(alpha, beta);
+        let expected = (1.0 - 0.85) * (1001.0_f64).ln();
+        assert!((bound - expected).abs() < 1e-9);
+
+        // Bound must strictly upper-bound any final_score PageRank component for PR in [0, 1]
+        for pr_raw in [0.0, 0.0001, 0.01, 0.5, 0.99, 1.0] {
+            let pr_component = final_score(0.0, pr_raw, alpha, beta);
+            assert!(pr_component <= bound + 1e-12);
+        }
+
+        // When alpha = 1.0, bound is 0.0
+        assert_eq!(pagerank_score_upper_bound(1.0, beta), 0.0);
+        // When alpha > 1.0 (clamped), bound is 0.0
+        assert_eq!(pagerank_score_upper_bound(1.5, beta), 0.0);
+    }
+
+    #[test]
+    fn test_pagerank_score_upper_bound_edge_cases() {
+        // Clamping of alpha < 0.0 treats alpha as 0.0
+        let b_neg = pagerank_score_upper_bound(-0.5, DEFAULT_BETA);
+        let b_zero = pagerank_score_upper_bound(0.0, DEFAULT_BETA);
+        assert!((b_neg - b_zero).abs() < 1e-9);
+        assert!((b_zero - (1.0 + DEFAULT_BETA).ln()).abs() < 1e-9);
+
+        // Alpha = 1.0 or > 1.0 -> 0.0
+        assert_eq!(pagerank_score_upper_bound(1.0, DEFAULT_BETA), 0.0);
+        assert_eq!(pagerank_score_upper_bound(2.0, DEFAULT_BETA), 0.0);
+
+        // Beta = 0.0 -> ln(1) = 0.0
+        assert_eq!(pagerank_score_upper_bound(0.5, 0.0), 0.0);
+
+        // Negative beta is clamped to 0.0, avoiding NaN from ln(<1) or ln(<=0)
+        assert_eq!(pagerank_score_upper_bound(0.5, -10.0), 0.0);
+
+        // Always finite and non-negative
+        for alpha in [-1.0, 0.0, 0.5, 0.85, 1.0, 2.0] {
+            for beta in [-100.0, 0.0, 1.0, 1000.0] {
+                let bound = pagerank_score_upper_bound(alpha, beta);
+                assert!(bound.is_finite() && bound >= 0.0);
+            }
+        }
     }
 
     #[test]
