@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        crate: [crawler, indexer, search_api]
+        crate: [engine_core, crawler, indexer, search_api]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
