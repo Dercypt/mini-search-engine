@@ -14,6 +14,12 @@ pub struct WandSearchResult {
     pub total_hits: usize,
 }
 
+/// Executes a dynamic pruning WAND (Weak AND) top-k search combined with PageRank scoring.
+///
+/// BM25 term upper bounds and the logarithmic PageRank theoretical upper bound
+/// `pr_max = (1 - alpha) * ln(1 + beta)` bound each document's maximum possible score.
+/// When the k-th score threshold rises, documents whose maximum possible score cannot
+/// exceed the threshold are skipped without full decompression or evaluation.
 pub fn execute_wand_search(
     index: &MmapIndex,
     dictionary: &TermDictionary,
@@ -149,6 +155,8 @@ pub fn execute_wand_search(
     while !cursors.is_empty() {
         cursors.sort_unstable_by_key(|c| c.current_doc_id);
 
+        // Required BM25 term upper bound sum for a candidate doc to beat the top-k threshold:
+        // score(d) <= sum(max_score_t) + pr_max => sum(max_score_t) > threshold - pr_max
         let score_limit = threshold - pr_max;
         let mut accum = 0.0;
         let mut pivot_idx = None;
