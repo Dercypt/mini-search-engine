@@ -20,15 +20,23 @@ A full-text search engine in Rust with asynchronous web crawling, memory-mapped 
 - WAND dynamic pruning
 - Prefix suggestions and phrase matching
 
-Installation
-Bash
+## Installation
 
+Clone the repository and build the project with Cargo:
+
+```bash
+git clone https://github.com/Dercypt/mini-search-engine.git
+cd mini-search-engine
 cargo build --release
+```
 
-Usage
-Bash
+## Usage
 
+Run the end-to-end crawler, indexing, and search server pipeline:
+
+```bash
 ./run_pipeline.sh
+```
 
 License
 
