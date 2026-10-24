@@ -21,11 +21,9 @@ A full-text search engine in Rust with asynchronous web crawling, memory-mapped 
 
 ## Installation
 
-Clone the repository and build the workspace using Cargo:
+Build the release binaries using Cargo:
 
 ```bash
-git clone https://github.com/Dercypt/mini-search-engine.git
-cd mini-search-engine
 cargo build --release
 ```
 
