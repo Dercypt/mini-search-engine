@@ -35,12 +35,6 @@ Run the complete pipeline to crawl, index, and start the search service:
 ./run_pipeline.sh
 ```
 
-Alternatively, run the service with Docker Compose:
-
-```bash
-docker compose up --build
-```
-
 ## License
 
 This project is licensed under the MIT License.
