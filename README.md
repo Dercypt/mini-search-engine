@@ -37,4 +37,4 @@ Run the complete pipeline to crawl, index, and start the search service:
 
 ## License
 
-This project is licensed under the MIT License.
+MIT License. See [LICENSE](LICENSE) for details.
