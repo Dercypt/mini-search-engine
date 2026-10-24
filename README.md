@@ -12,21 +12,13 @@ A full-text search engine in Rust with asynchronous web crawling, memory-mapped 
 - Memmap2
 - FST
 
-Features
+## Features
 
-    Web crawling
-
-    Binary inverted indexing
-
-    BM25 ranking
-
-    PageRank
-
-    WAND dynamic pruning
-
-    Prefix suggestions
-
-    Exact phrase matching
+- Asynchronous web crawling
+- Binary inverted indexing
+- BM25 and PageRank ranking
+- WAND dynamic pruning
+- Prefix suggestions and phrase matching
 
 Installation
 Bash
