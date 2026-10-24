@@ -1,48 +1,43 @@
-Mini Search Engine
+# Mini Search Engine
 
 A full-text search engine in Rust with asynchronous web crawling, memory-mapped binary inverted indexing, and ranked retrieval.
-Tech Stack
 
-    Rust
+## Tech Stack
 
-    Tokio
+- Rust
+- Tokio
+- Axum
+- Reqwest
+- Scraper
+- Memmap2
+- FST
 
-    Axum
+## Features
 
-    Reqwest
+- Asynchronous web crawling
+- Binary inverted indexing
+- BM25 and PageRank ranking
+- WAND dynamic pruning
+- Prefix suggestions and phrase matching
 
-    Scraper
+## Installation
 
-    Memmap2
+Clone the repository and build the project with Cargo:
 
-    FST
-
-Features
-
-    Web crawling
-
-    Binary inverted indexing
-
-    BM25 ranking
-
-    PageRank
-
-    WAND dynamic pruning
-
-    Prefix suggestions
-
-    Exact phrase matching
-
-Installation
-Bash
-
+```bash
+git clone https://github.com/Dercypt/mini-search-engine.git
+cd mini-search-engine
 cargo build --release
+```
 
-Usage
-Bash
+## Usage
 
+Run the end-to-end crawler, indexing, and search server pipeline:
+
+```bash
 ./run_pipeline.sh
+```
 
-License
+## License
 
 MIT
