@@ -38,6 +38,6 @@ Run the end-to-end crawler, indexing, and search server pipeline:
 ./run_pipeline.sh
 ```
 
-License
+## License
 
 MIT
