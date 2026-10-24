@@ -7,9 +7,10 @@ A full-text search engine in Rust with asynchronous web crawling, memory-mapped 
 - Rust
 - Tokio
 - Axum
-- Reqwest & Scraper
-- Memmap2
-- FST
+- Reqwest
+- Scraper
+- memmap2
+- fst
 
 ## Features
 
