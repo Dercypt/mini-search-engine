@@ -32,3 +32,13 @@ Features
     Prefix suggestions
 
     Exact phrase matching
+
+Installation
+Bash
+
+cargo build --release
+
+Usage
+Bash
+
+./run_pipeline.sh
