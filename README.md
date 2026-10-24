@@ -17,3 +17,27 @@ A full-text search engine in Rust with asynchronous web crawling, memory-mapped 
 - Zero-copy binary inverted indexing using variable-byte delta encoding.
 - Ranked search combining BM25 scoring, PageRank, and WAND dynamic pruning.
 - Quoted exact phrase matching and FST-based prefix suggestions.
+
+## Installation
+
+Clone the repository and build the workspace using Cargo:
+
+```bash
+git clone https://github.com/Dercypt/mini-search-engine.git
+cd mini-search-engine
+cargo build --release
+```
+
+## Usage
+
+Run the complete pipeline to crawl, index, and start the search service:
+
+```bash
+./run_pipeline.sh
+```
+
+Alternatively, run the service with Docker Compose:
+
+```bash
+docker compose up --build
+```
