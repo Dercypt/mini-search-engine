@@ -16,3 +16,19 @@ Tech Stack
     Memmap2
 
     FST
+
+Features
+
+    Web crawling
+
+    Binary inverted indexing
+
+    BM25 ranking
+
+    PageRank
+
+    WAND dynamic pruning
+
+    Prefix suggestions
+
+    Exact phrase matching
