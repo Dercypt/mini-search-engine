@@ -42,3 +42,7 @@ Usage
 Bash
 
 ./run_pipeline.sh
+
+License
+
+MIT
